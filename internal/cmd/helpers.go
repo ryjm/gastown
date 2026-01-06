@@ -167,13 +167,13 @@ func ensureDefaultBranch(dir, roleName, rigPath string) bool { //nolint:unparam 
 		return true
 	}
 
-	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
+	// Get configured default branch - auto-detect from remote, allow rig config override
+	defaultBranch := g.RemoteDefaultBranch()
 	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
 
-	if branch == defaultBranch || branch == "master" {
+	if branch == defaultBranch {
 		return true
 	}
 
