@@ -899,12 +899,6 @@ func verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 		return false, fmt.Errorf("finding town root: %v", err)
 	}
 
-	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
-
 	// Construct polecat path, handling both new and old structures
 	// New structure: polecats/<name>/<rigname>/
 	// Old structure: polecats/<name>/
@@ -916,6 +910,12 @@ func verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 
 	// Get git for the polecat worktree
 	g := git.NewGit(polecatPath)
+
+	// Get configured default branch - auto-detect from remote, allow rig config override
+	defaultBranch := g.RemoteDefaultBranch() // auto-detect main vs master
+	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		defaultBranch = rigCfg.DefaultBranch
+	}
 
 	// Get the current HEAD commit SHA
 	commitSHA, err := g.Rev("HEAD")
