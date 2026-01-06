@@ -1691,8 +1691,8 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 		return nil, nil
 	}
 
-	// Get default branch from rig config
-	defaultBranch := "main"
+	// Get default branch - auto-detect from remote, allow rig config override
+	defaultBranch := m.git.RemoteDefaultBranch()
 	if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
