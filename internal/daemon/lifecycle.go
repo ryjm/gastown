@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -557,9 +558,10 @@ func (d *Daemon) applySessionTheme(sessionName string, parsed *ParsedIdentity) {
 // syncWorkspace syncs a git workspace before starting a new session.
 // This ensures agents with persistent clones (like refinery) start with current code.
 func (d *Daemon) syncWorkspace(workDir string) {
-	// Determine default branch from rig config
+	// Determine default branch - auto-detect from remote, allow rig config override
 	// workDir is like <townRoot>/<rigName>/<role>/rig or <townRoot>/<rigName>/crew/<name>
-	defaultBranch := "main" // fallback
+	g := git.NewGit(workDir)
+	defaultBranch := g.RemoteDefaultBranch() // auto-detect main vs master
 	rel, err := filepath.Rel(d.config.TownRoot, workDir)
 	if err == nil {
 		parts := strings.Split(rel, string(filepath.Separator))

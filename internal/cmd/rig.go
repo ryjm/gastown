@@ -406,8 +406,9 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 
 	elapsed := time.Since(startTime)
 
-	// Read default branch from rig config
-	defaultBranch := "main"
+	// Read default branch - auto-detect from remote, allow rig config override
+	mayorRig := git.NewGit(filepath.Join(townRoot, name, "mayor", "rig"))
+	defaultBranch := mayorRig.RemoteDefaultBranch()
 	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, name)); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
