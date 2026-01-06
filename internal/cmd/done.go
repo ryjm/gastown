@@ -350,7 +350,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Get configured default branch for this rig
-	defaultBranch := "main" // fallback
+	// Auto-detect from remote (handles main vs master), then allow rig config override
+	defaultBranch := g.RemoteDefaultBranch()
 	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
@@ -361,8 +362,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	var doneErrors []string
 	var convoyInfo *ConvoyInfo // Populated if issue is tracked by a convoy
 	if exitType == ExitCompleted {
-		if branch == defaultBranch || branch == "master" {
-			return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
+		if branch == defaultBranch {
+			return fmt.Errorf("cannot submit %s branch to merge queue", defaultBranch)
 		}
 
 		// CRITICAL: Verify work exists before completing (hq-xthqf)
