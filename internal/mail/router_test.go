@@ -813,3 +813,84 @@ func TestExpandAnnounceNoTownRoot(t *testing.T) {
 		t.Errorf("expandAnnounce error = %v, want containing 'no town root'", err)
 	}
 }
+
+// ============ GetMailbox Tests ============
+
+func TestGetMailboxUsesResolvedBeadsDir(t *testing.T) {
+	// This test ensures that GetMailbox uses the beads directory returned by
+	// r.resolveBeadsDir() directly, rather than re-resolving it through
+	// beads.ResolveBeadsDir(). This is critical because re-resolving could
+	// follow redirects and query a different location than where messages
+	// were written during Send.
+	//
+	// Bug this prevents: Messages sent to crew addresses like "tabula/crew/vai"
+	// would be written to townRoot/.beads but queries would go to a different
+	// location if a redirect existed at townRoot/.beads/redirect.
+
+	r := NewRouterWithTownRoot("/work/dir", "/home/user/gt")
+
+	// Test with various address types
+	tests := []struct {
+		name         string
+		address      string
+		wantBeadsDir string
+	}{
+		{
+			name:         "crew address",
+			address:      "tabula/crew/vai",
+			wantBeadsDir: "/home/user/gt/.beads",
+		},
+		{
+			name:         "polecat address",
+			address:      "gastown/polecats/Toast",
+			wantBeadsDir: "/home/user/gt/.beads",
+		},
+		{
+			name:         "normalized address",
+			address:      "gastown/Toast",
+			wantBeadsDir: "/home/user/gt/.beads",
+		},
+		{
+			name:         "mayor address",
+			address:      "mayor/",
+			wantBeadsDir: "/home/user/gt/.beads",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mailbox, err := r.GetMailbox(tt.address)
+			if err != nil {
+				t.Fatalf("GetMailbox(%q) error: %v", tt.address, err)
+			}
+
+			// The mailbox should use the beads directory from r.resolveBeadsDir()
+			// directly, not a re-resolved one.
+			if mailbox.beadsDir != tt.wantBeadsDir {
+				t.Errorf("GetMailbox(%q).beadsDir = %q, want %q",
+					tt.address, mailbox.beadsDir, tt.wantBeadsDir)
+			}
+		})
+	}
+}
+
+func TestGetMailboxCrewAddressNormalization(t *testing.T) {
+	// Verify that crew addresses are properly normalized when creating mailboxes.
+	// This ensures that messages sent to "tabula/crew/vai" can be found when
+	// checking inbox with the same address.
+
+	r := NewRouterWithTownRoot("/work/dir", "/home/user/gt")
+
+	// Get mailbox for a crew address
+	mailbox, err := r.GetMailbox("tabula/crew/vai")
+	if err != nil {
+		t.Fatalf("GetMailbox error: %v", err)
+	}
+
+	// The identity should be normalized (crew/ segment removed)
+	wantIdentity := "tabula/vai"
+	if mailbox.identity != wantIdentity {
+		t.Errorf("GetMailbox('tabula/crew/vai').identity = %q, want %q",
+			mailbox.identity, wantIdentity)
+	}
+}
