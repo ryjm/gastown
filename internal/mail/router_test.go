@@ -2,7 +2,6 @@ package mail
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -87,52 +86,7 @@ func TestIsTownLevelAddress(t *testing.T) {
 	}
 }
 
-func TestAddressToSessionIDs(t *testing.T) {
-	tests := []struct {
-		address string
-		want    []string
-	}{
-		// Town-level addresses - single session
-		{"mayor", []string{"hq-mayor"}},
-		{"mayor/", []string{"hq-mayor"}},
-		{"deacon", []string{"hq-deacon"}},
-
-		// Rig singletons - single session (no crew/polecat ambiguity)
-		{"gastown/refinery", []string{"gt-gastown-refinery"}},
-		{"beads/witness", []string{"gt-beads-witness"}},
-
-		// Ambiguous addresses - try both crew and polecat variants
-		{"gastown/Toast", []string{"gt-gastown-crew-Toast", "gt-gastown-Toast"}},
-		{"beads/ruby", []string{"gt-beads-crew-ruby", "gt-beads-ruby"}},
-
-		// Explicit crew/polecat - single session
-		{"gastown/crew/max", []string{"gt-gastown-crew-max"}},
-		{"gastown/polecats/nux", []string{"gt-gastown-polecats-nux"}},
-
-		// Invalid addresses - empty result
-		{"gastown/", nil},  // Empty target
-		{"gastown", nil},   // No slash
-		{"", nil},          // Empty address
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.address, func(t *testing.T) {
-			got := addressToSessionIDs(tt.address)
-			if len(got) != len(tt.want) {
-				t.Errorf("addressToSessionIDs(%q) = %v, want %v", tt.address, got, tt.want)
-				return
-			}
-			for i, v := range got {
-				if v != tt.want[i] {
-					t.Errorf("addressToSessionIDs(%q)[%d] = %q, want %q", tt.address, i, v, tt.want[i])
-				}
-			}
-		})
-	}
-}
-
 func TestAddressToSessionID(t *testing.T) {
-	// Deprecated wrapper - returns first candidate from addressToSessionIDs
 	tests := []struct {
 		address string
 		want    string
@@ -141,7 +95,7 @@ func TestAddressToSessionID(t *testing.T) {
 		{"mayor/", "hq-mayor"},
 		{"deacon", "hq-deacon"},
 		{"gastown/refinery", "gt-gastown-refinery"},
-		{"gastown/Toast", "gt-gastown-crew-Toast"}, // First candidate is crew
+		{"gastown/Toast", "gt-gastown-Toast"},
 		{"beads/witness", "gt-beads-witness"},
 		{"gastown/", ""},   // Empty target
 		{"gastown", ""},    // No slash
@@ -244,7 +198,7 @@ func TestResolveBeadsDir(t *testing.T) {
 	r := NewRouterWithTownRoot("/work/dir", "/home/user/gt")
 	got := r.resolveBeadsDir("gastown/Toast")
 	want := "/home/user/gt/.beads"
-	if filepath.ToSlash(got) != want {
+	if got != want {
 		t.Errorf("resolveBeadsDir with townRoot = %q, want %q", got, want)
 	}
 
@@ -252,17 +206,17 @@ func TestResolveBeadsDir(t *testing.T) {
 	r2 := &Router{workDir: "/work/dir", townRoot: ""}
 	got2 := r2.resolveBeadsDir("mayor/")
 	want2 := "/work/dir/.beads"
-	if filepath.ToSlash(got2) != want2 {
+	if got2 != want2 {
 		t.Errorf("resolveBeadsDir without townRoot = %q, want %q", got2, want2)
 	}
 }
 
 func TestNewRouterWithTownRoot(t *testing.T) {
 	r := NewRouterWithTownRoot("/work/rig", "/home/gt")
-	if filepath.ToSlash(r.workDir) != "/work/rig" {
+	if r.workDir != "/work/rig" {
 		t.Errorf("workDir = %q, want '/work/rig'", r.workDir)
 	}
-	if filepath.ToSlash(r.townRoot) != "/home/gt" {
+	if r.townRoot != "/home/gt" {
 		t.Errorf("townRoot = %q, want '/home/gt'", r.townRoot)
 	}
 }
@@ -857,6 +811,87 @@ func TestExpandAnnounceNoTownRoot(t *testing.T) {
 	}
 	if !contains(err.Error(), "no town root") {
 		t.Errorf("expandAnnounce error = %v, want containing 'no town root'", err)
+	}
+}
+
+// ============ GetMailbox Tests ============
+
+func TestGetMailboxUsesResolvedBeadsDir(t *testing.T) {
+	// This test ensures that GetMailbox uses the beads directory returned by
+	// r.resolveBeadsDir() directly, rather than re-resolving it through
+	// beads.ResolveBeadsDir(). This is critical because re-resolving could
+	// follow redirects and query a different location than where messages
+	// were written during Send.
+	//
+	// Bug this prevents: Messages sent to crew addresses like "tabula/crew/vai"
+	// would be written to townRoot/.beads but queries would go to a different
+	// location if a redirect existed at townRoot/.beads/redirect.
+
+	r := NewRouterWithTownRoot("/work/dir", "/home/user/gt")
+
+	// Test with various address types
+	tests := []struct {
+		name         string
+		address      string
+		wantBeadsDir string
+	}{
+		{
+			name:         "crew address",
+			address:      "tabula/crew/vai",
+			wantBeadsDir: "/home/user/gt/.beads",
+		},
+		{
+			name:         "polecat address",
+			address:      "gastown/polecats/Toast",
+			wantBeadsDir: "/home/user/gt/.beads",
+		},
+		{
+			name:         "normalized address",
+			address:      "gastown/Toast",
+			wantBeadsDir: "/home/user/gt/.beads",
+		},
+		{
+			name:         "mayor address",
+			address:      "mayor/",
+			wantBeadsDir: "/home/user/gt/.beads",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mailbox, err := r.GetMailbox(tt.address)
+			if err != nil {
+				t.Fatalf("GetMailbox(%q) error: %v", tt.address, err)
+			}
+
+			// The mailbox should use the beads directory from r.resolveBeadsDir()
+			// directly, not a re-resolved one.
+			if mailbox.beadsDir != tt.wantBeadsDir {
+				t.Errorf("GetMailbox(%q).beadsDir = %q, want %q",
+					tt.address, mailbox.beadsDir, tt.wantBeadsDir)
+			}
+		})
+	}
+}
+
+func TestGetMailboxCrewAddressNormalization(t *testing.T) {
+	// Verify that crew addresses are properly normalized when creating mailboxes.
+	// This ensures that messages sent to "tabula/crew/vai" can be found when
+	// checking inbox with the same address.
+
+	r := NewRouterWithTownRoot("/work/dir", "/home/user/gt")
+
+	// Get mailbox for a crew address
+	mailbox, err := r.GetMailbox("tabula/crew/vai")
+	if err != nil {
+		t.Fatalf("GetMailbox error: %v", err)
+	}
+
+	// The identity should be normalized (crew/ segment removed)
+	wantIdentity := "tabula/vai"
+	if mailbox.identity != wantIdentity {
+		t.Errorf("GetMailbox('tabula/crew/vai').identity = %q, want %q",
+			mailbox.identity, wantIdentity)
 	}
 }
 

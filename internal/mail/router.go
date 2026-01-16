@@ -1066,7 +1066,12 @@ func isSelfMail(from, to string) bool {
 func (r *Router) GetMailbox(address string) (*Mailbox, error) {
 	beadsDir := r.resolveBeadsDir(address)
 	workDir := filepath.Dir(beadsDir) // Parent of .beads
-	return NewMailboxFromAddress(address, workDir), nil
+	// Use NewMailboxWithBeadsDir to avoid re-resolving the beads directory.
+	// This ensures consistency with the send path which uses r.resolveBeadsDir()
+	// directly. Using NewMailboxFromAddress would call beads.ResolveBeadsDir()
+	// again, potentially following redirects and querying a different location
+	// than where messages were written.
+	return NewMailboxWithBeadsDir(address, workDir, beadsDir), nil
 }
 
 // notifyRecipient sends a notification to a recipient's tmux session.
