@@ -550,7 +550,7 @@ func runPolecatRemove(cmd *cobra.Command, args []string) error {
 
 		// When --force is used, pass nuclear=true to bypass ALL safety checks
 		// (including stashes and unpushed commits, not just uncommitted changes)
-		if err := p.mgr.RemoveWithOptions(p.polecatName, polecatForce, polecatForce); err != nil {
+		if err := p.mgr.RemoveWithOptions(p.polecatName, polecatForce, polecatForce, false); err != nil {
 			if errors.Is(err, polecat.ErrHasChanges) {
 				removeErrors = append(removeErrors, fmt.Sprintf("%s/%s: has uncommitted changes (use --force)", p.rigName, p.polecatName))
 			} else {
