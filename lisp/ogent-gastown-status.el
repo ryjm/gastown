@@ -1,0 +1,1920 @@
+;;; ogent-gastown-status.el --- Magit-style Gas Town status buffer -*- lexical-binding: t; -*-
+
+;;; Commentary:
+;; Provides a magit-section based buffer for viewing Gas Town status.
+;; Displays hook status, mail inbox, convoy progress, and workers overview.
+;; Designed to feel native to magit users with familiar keybindings.
+;;
+;; Entry point: `ogent-gastown-status' to open the status buffer.
+;;
+;; This follows the patterns established by magit-status-mode:
+;; - Collapsible sections via magit-section
+;; - Per-project buffers
+;; - Position restoration after refresh
+;; - Customizable display behavior
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'seq)
+(require 'subr-x)
+(require 'eieio)
+(require 'json)
+
+;; Soft dependency on magit-section
+(eval-and-compile
+  (defvar ogent-gastown--magit-section-available
+    (require 'magit-section nil t)
+    "Non-nil if magit-section is available.")
+  (when ogent-gastown--magit-section-available
+    (require 'magit-section)))
+
+;; Load transient help menu if available
+(declare-function ogent-gastown-status-dispatch "ogent-gastown-status-transient" nil t)
+(autoload 'ogent-gastown-status-dispatch "ogent-gastown-status-transient" nil t)
+
+;; Declare magit functions to avoid byte-compile warnings
+(declare-function magit-insert-section "ext:magit-section")
+(declare-function magit-insert-heading "ext:magit-section")
+(declare-function magit-section-forward "ext:magit-section")
+(declare-function magit-section-backward "ext:magit-section")
+(declare-function magit-section-toggle "ext:magit-section")
+(declare-function magit-current-section "ext:magit-section")
+(declare-function magit-section-forward-sibling "ext:magit-section")
+(declare-function magit-section-backward-sibling "ext:magit-section")
+(declare-function magit-section-up "ext:magit-section")
+(declare-function magit-section-cycle-global "ext:magit-section")
+
+;;; Customization
+
+(defgroup ogent-gastown nil
+  "Gas Town status viewer."
+  :group 'ogent
+  :prefix "ogent-gastown-")
+
+(defcustom ogent-gastown-buffer-name "*Gas Town*"
+  "Name of the Gas Town status buffer.
+When `ogent-gastown-per-project-buffers' is non-nil, the rig name
+is appended to create per-project buffers."
+  :type 'string
+  :group 'ogent-gastown)
+
+(defcustom ogent-gastown-per-project-buffers t
+  "When non-nil, create separate buffer for each rig/project.
+Buffer names will be `*Gas Town: <rig>*'.
+When nil, use single shared buffer.
+Default is t, matching magit's behavior of per-repo buffers."
+  :type 'boolean
+  :group 'ogent-gastown)
+
+(defcustom ogent-gastown-display-buffer-action 'same-window
+  "How to display the Gas Town status buffer.
+Options:
+  `same-window' - Take over current window (like `magit-status')
+  `other-window' - Display in another window"
+  :type '(choice (const :tag "Same window (magit-style)" same-window)
+                 (const :tag "Other window" other-window))
+  :group 'ogent-gastown)
+
+(defcustom ogent-gastown-gt-executable "gt"
+  "Path to the gt executable."
+  :type 'string
+  :group 'ogent-gastown)
+
+(defcustom ogent-gastown-timeout 30
+  "Timeout in seconds for gt commands."
+  :type 'integer
+  :group 'ogent-gastown)
+
+(defcustom ogent-gastown-cache-ttl 5
+  "Cache time-to-live in seconds."
+  :type 'integer
+  :group 'ogent-gastown)
+
+(defcustom ogent-gastown-use-unicode t
+  "Whether to use Unicode characters for icons."
+  :type 'boolean
+  :group 'ogent-gastown)
+
+(defcustom ogent-gastown-collapsed-sections '()
+  "List of section types that should be collapsed by default.
+Valid values: `workers', `rigs', `closed-convoys'."
+  :type '(repeat symbol)
+  :group 'ogent-gastown)
+
+;;; Faces
+
+(defgroup ogent-gastown-faces nil
+  "Faces for ogent-gastown."
+  :group 'ogent-gastown
+  :group 'faces)
+
+(defface ogent-gastown-section-heading
+  '((((class color) (background light)) :foreground "#5d4037" :weight bold)
+    (((class color) (background dark)) :foreground "#ebcb8b" :weight bold))
+  "Face for section headings."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-hook-active
+  '((((class color) (background light)) :foreground "#2e7d32" :weight bold)
+    (((class color) (background dark)) :foreground "#a3be8c" :weight bold))
+  "Face for active hook indicator."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-hook-empty
+  '((((class color) (background light)) :foreground "#78909c")
+    (((class color) (background dark)) :foreground "#4c566a"))
+  "Face for empty hook state."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-mail-unread
+  '((((class color) (background light)) :foreground "#1565c0" :weight bold)
+    (((class color) (background dark)) :foreground "#88c0d0" :weight bold))
+  "Face for unread mail."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-mail-read
+  '((((class color) (background light)) :foreground "#78909c")
+    (((class color) (background dark)) :foreground "#4c566a"))
+  "Face for read mail."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-mail-from
+  '((((class color) (background light)) :foreground "#6a1b9a")
+    (((class color) (background dark)) :foreground "#b48ead"))
+  "Face for mail sender."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-convoy-active
+  '((((class color) (background light)) :foreground "#6a1b9a" :weight bold)
+    (((class color) (background dark)) :foreground "#b48ead" :weight bold))
+  "Face for active convoy."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-convoy-complete
+  '((((class color) (background light)) :foreground "#2e7d32")
+    (((class color) (background dark)) :foreground "#a3be8c"))
+  "Face for completed convoy."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-worker-running
+  '((((class color) (background light)) :foreground "#2e7d32" :weight bold)
+    (((class color) (background dark)) :foreground "#a3be8c" :weight bold))
+  "Face for running worker."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-worker-done
+  '((((class color) (background light)) :foreground "#78909c")
+    (((class color) (background dark)) :foreground "#4c566a"))
+  "Face for done worker."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-worker-working
+  '((((class color) (background light)) :foreground "#ff8f00" :weight bold)
+    (((class color) (background dark)) :foreground "#ebcb8b" :weight bold))
+  "Face for working worker."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-dimmed
+  '((((class color) (background light)) :foreground "#78909c")
+    (((class color) (background dark)) :foreground "#4c566a"))
+  "Face for less important text."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-stats-label
+  '((((class color) (background light)) :foreground "#37474f")
+    (((class color) (background dark)) :foreground "#d8dee9"))
+  "Face for stats labels."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-stats-value
+  '((((class color) (background light)) :foreground "#1565c0" :weight bold)
+    (((class color) (background dark)) :foreground "#88c0d0" :weight bold))
+  "Face for stats values."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-deacon-running
+  '((((class color) (background light)) :foreground "#2e7d32" :weight bold)
+    (((class color) (background dark)) :foreground "#a3be8c" :weight bold))
+  "Face for running deacon."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-deacon-stopped
+  '((((class color) (background light)) :foreground "#c62828")
+    (((class color) (background dark)) :foreground "#bf616a"))
+  "Face for stopped deacon."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-witness-healthy
+  '((((class color) (background light)) :foreground "#2e7d32")
+    (((class color) (background dark)) :foreground "#a3be8c"))
+  "Face for healthy witness."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-witness-unhealthy
+  '((((class color) (background light)) :foreground "#c62828")
+    (((class color) (background dark)) :foreground "#bf616a"))
+  "Face for unhealthy witness."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-crew-active
+  '((((class color) (background light)) :foreground "#1565c0" :weight bold)
+    (((class color) (background dark)) :foreground "#5e81ac" :weight bold))
+  "Face for active crew member."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-crew-idle
+  '((((class color) (background light)) :foreground "#78909c")
+    (((class color) (background dark)) :foreground "#4c566a"))
+  "Face for idle crew member."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-polecat-active
+  '((((class color) (background light)) :foreground "#6a1b9a" :weight bold)
+    (((class color) (background dark)) :foreground "#b48ead" :weight bold))
+  "Face for active polecat."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-polecat-idle
+  '((((class color) (background light)) :foreground "#78909c")
+    (((class color) (background dark)) :foreground "#4c566a"))
+  "Face for idle polecat."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-rig-name
+  '((((class color) (background light)) :foreground "#5d4037" :weight bold)
+    (((class color) (background dark)) :foreground "#ebcb8b" :weight bold))
+  "Face for rig names."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-rig-running
+  '((((class color) (background light)) :foreground "#2e7d32")
+    (((class color) (background dark)) :foreground "#a3be8c"))
+  "Face for running rig indicator."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-rig-stopped
+  '((((class color) (background light)) :foreground "#78909c")
+    (((class color) (background dark)) :foreground "#4c566a"))
+  "Face for stopped rig indicator."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-header-line
+  '((((class color) (background light))
+     :background "grey90" :foreground "grey20"
+     :weight bold :box (:line-width 2 :color "grey90"))
+    (((class color) (background dark))
+     :background "#2e3440" :foreground "#eceff4"
+     :weight bold :box (:line-width 2 :color "#2e3440")))
+  "Face for the header line."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-header-line-key
+  '((((class color) (background light))
+     :background "grey90" :foreground "#5e35b1" :weight bold)
+    (((class color) (background dark))
+     :background "#2e3440" :foreground "#b48ead" :weight bold))
+  "Face for keybindings in header line."
+  :group 'ogent-gastown-faces)
+
+(defface ogent-gastown-header-line-rig
+  '((((class color) (background light))
+     :background "grey90" :foreground "#5e81ac" :weight bold)
+    (((class color) (background dark))
+     :background "#2e3440" :foreground "#88c0d0" :weight bold))
+  "Face for rig name in header line."
+  :group 'ogent-gastown-faces)
+
+;;; Buffer-local State
+
+(defvar-local ogent-gastown--hook-data nil
+  "Cached hook status data.")
+
+(defvar-local ogent-gastown--mail-data nil
+  "Cached mail inbox data.")
+
+(defvar-local ogent-gastown--convoy-data nil
+  "Cached convoy list data.")
+
+(defvar-local ogent-gastown--workers-data nil
+  "Cached workers list data.")
+
+(defvar-local ogent-gastown--stats-data nil
+  "Cached town statistics data.")
+
+(defvar-local ogent-gastown--deacon-data nil
+  "Cached deacon status data.")
+
+(defvar-local ogent-gastown--witness-data nil
+  "Cached witness status data (list of rig witness statuses).")
+
+(defvar-local ogent-gastown--crew-data nil
+  "Cached crew list data.")
+
+(defvar-local ogent-gastown--polecat-data nil
+  "Cached polecat list data.")
+
+(defvar-local ogent-gastown--rigs-data nil
+  "Cached rigs list data.")
+
+(defvar-local ogent-gastown--loading nil
+  "Non-nil when a gt command is in progress.")
+
+(defvar-local ogent-gastown--loading-timer nil
+  "Timer for animating the loading spinner.")
+
+(defvar-local ogent-gastown--loading-frame 0
+  "Current animation frame index.")
+
+(defvar-local ogent-gastown--town-root nil
+  "Gas Town root directory for this buffer.")
+
+(defvar-local ogent-gastown--current-rig nil
+  "Current rig name for this buffer.")
+
+(defvar-local ogent-gastown--last-position nil
+  "Last cursor position for restoration after refresh.")
+
+;;; Cache
+
+(defvar ogent-gastown--cache (make-hash-table :test 'equal)
+  "Cache for gt command results.")
+
+(defun ogent-gastown--cache-key (args)
+  "Generate cache key from ARGS."
+  (format "%S" args))
+
+(defun ogent-gastown--cache-get (args)
+  "Get cached result for ARGS if valid."
+  (when (> ogent-gastown-cache-ttl 0)
+    (let* ((key (ogent-gastown--cache-key args))
+           (entry (gethash key ogent-gastown--cache)))
+      (when entry
+        (let ((timestamp (car entry))
+              (result (cdr entry)))
+          (if (< (float-time (time-subtract (current-time) timestamp))
+                 ogent-gastown-cache-ttl)
+              result
+            (remhash key ogent-gastown--cache)
+            nil))))))
+
+(defun ogent-gastown--cache-set (args result)
+  "Cache RESULT for ARGS."
+  (when (> ogent-gastown-cache-ttl 0)
+    (let ((key (ogent-gastown--cache-key args)))
+      (puthash key (cons (current-time) result) ogent-gastown--cache))))
+
+(defun ogent-gastown-cache-invalidate ()
+  "Invalidate all cached results."
+  (interactive)
+  (clrhash ogent-gastown--cache))
+
+;;; Async Execution
+
+(defvar ogent-gastown--processes nil
+  "List of active gt processes.")
+
+(defun ogent-gastown--run-async (args callback &optional error-callback raw-output)
+  "Run gt with ARGS asynchronously, call CALLBACK with result.
+ERROR-CALLBACK receives error message on failure.
+If RAW-OUTPUT is non-nil, pass raw string instead of parsed JSON."
+  (let* ((default-directory (or ogent-gastown--town-root
+                                (ogent-gastown--find-town-root)
+                                default-directory))
+         (buffer (generate-new-buffer " *ogent-gt*"))
+         (stderr-buffer (generate-new-buffer " *ogent-gt-stderr*"))
+         (proc nil)
+         (timer nil))
+
+    (setq timer
+          (run-with-timer
+           ogent-gastown-timeout nil
+           (lambda ()
+             (when (and proc (process-live-p proc))
+               (kill-process proc)
+               (when error-callback
+                 (funcall error-callback
+                          (format "gt command timed out after %ds"
+                                  ogent-gastown-timeout)))))))
+
+    (let ((full-command (cons ogent-gastown-gt-executable args)))
+      (setq proc
+            (make-process
+             :name "ogent-gt"
+             :buffer buffer
+             :stderr stderr-buffer
+             :command full-command
+             :sentinel
+             (lambda (process event)
+               (when timer (cancel-timer timer))
+               (setq ogent-gastown--processes
+                     (delq process ogent-gastown--processes))
+
+               (cond
+                ((string= event "finished\n")
+                 (with-current-buffer (process-buffer process)
+                   (goto-char (point-min))
+                   (skip-chars-forward " \t\n\r")
+                   (condition-case err
+                       (let ((result (if raw-output
+                                         (buffer-string)
+                                       (if (eobp)
+                                           '()
+                                         (json-parse-buffer
+                                          :object-type 'plist
+                                          :array-type 'list
+                                          :null-object nil
+                                          :false-object nil)))))
+                         (funcall callback result))
+                     (error
+                      (if error-callback
+                          (funcall error-callback
+                                   (format "JSON parse error: %s"
+                                           (error-message-string err)))
+                        (message "ogent-gt: JSON parse error: %s"
+                                 (error-message-string err))))))
+                 (when (buffer-live-p (process-buffer process))
+                   (kill-buffer (process-buffer process)))
+                 (when (buffer-live-p stderr-buffer)
+                   (kill-buffer stderr-buffer)))
+
+                ((string-match "exited abnormally" event)
+                 (let ((stderr-content
+                        (when (buffer-live-p stderr-buffer)
+                          (with-current-buffer stderr-buffer
+                            (string-trim (buffer-string))))))
+                   (if error-callback
+                       (funcall error-callback
+                                (or stderr-content
+                                    (format "gt command failed: %s" event)))
+                     (message "ogent-gt error: %s" (or stderr-content event))))
+                 (when (buffer-live-p (process-buffer process))
+                   (kill-buffer (process-buffer process)))
+                 (when (buffer-live-p stderr-buffer)
+                   (kill-buffer stderr-buffer)))
+
+                (t
+                 (when (buffer-live-p (process-buffer process))
+                   (kill-buffer (process-buffer process)))
+                 (when (buffer-live-p stderr-buffer)
+                   (kill-buffer stderr-buffer))))))))
+
+    (push proc ogent-gastown--processes)
+    proc))
+
+;;; Town Detection
+
+(defun ogent-gastown--find-town-root ()
+  "Find the Gas Town root directory."
+  (or (getenv "GT_ROOT")
+      (expand-file-name "~/gt")))
+
+(defun ogent-gastown--in-town-p ()
+  "Return non-nil if gt is available."
+  (executable-find ogent-gastown-gt-executable))
+
+(defun ogent-gastown--current-rig ()
+  "Return the current rig name, or nil."
+  (or ogent-gastown--current-rig
+      ;; Try to detect from default-directory
+      (let ((dir (expand-file-name default-directory))
+            (town-root (ogent-gastown--find-town-root)))
+        (when (and town-root (string-prefix-p town-root dir))
+          (let ((relative (substring dir (length town-root))))
+            ;; Extract rig name from path like /rig/crew/member or /rig/
+            (when (string-match "^/?\\([^/]+\\)" relative)
+              (match-string 1 relative)))))))
+
+;;; Section Classes (when magit-section available)
+
+(eval-and-compile
+  (when (bound-and-true-p ogent-gastown--magit-section-available)
+    (defclass ogent-gastown-root-section (magit-section) ()
+      "Root section for Gas Town status buffer.")
+
+    (defclass ogent-gastown-hook-section (magit-section) ()
+      "Section for hook status.")
+
+    (defclass ogent-gastown-mail-section (magit-section) ()
+      "Section for mail inbox.")
+
+    (defclass ogent-gastown-mail-item-section (magit-section) ()
+      "Section for a single mail message.")
+
+    (defclass ogent-gastown-convoy-section (magit-section) ()
+      "Section for convoy status.")
+
+    (defclass ogent-gastown-convoy-item-section (magit-section) ()
+      "Section for a single convoy.")
+
+    (defclass ogent-gastown-workers-section (magit-section) ()
+      "Section for workers overview.")
+
+    (defclass ogent-gastown-worker-section (magit-section) ()
+      "Section for a single worker.")
+
+    (defclass ogent-gastown-stats-section (magit-section) ()
+      "Section for town statistics.")
+
+    (defclass ogent-gastown-deacon-section (magit-section) ()
+      "Section for deacon status.")
+
+    (defclass ogent-gastown-witness-section (magit-section) ()
+      "Section for witness status overview.")
+
+    (defclass ogent-gastown-witness-item-section (magit-section) ()
+      "Section for a single rig witness.")
+
+    (defclass ogent-gastown-crew-section (magit-section) ()
+      "Section for crew members.")
+
+    (defclass ogent-gastown-crew-item-section (magit-section) ()
+      "Section for a single crew member.")
+
+    (defclass ogent-gastown-polecat-section (magit-section) ()
+      "Section for polecats.")
+
+    (defclass ogent-gastown-polecat-item-section (magit-section) ()
+      "Section for a single polecat.")
+
+    (defclass ogent-gastown-rigs-section (magit-section) ()
+      "Section for rigs overview.")
+
+    (defclass ogent-gastown-rig-item-section (magit-section) ()
+      "Section for a single rig.")))
+
+;;; Keymap
+
+(defvar ogent-gastown-status-mode-map
+  (let ((map (make-sparse-keymap)))
+    (when (and ogent-gastown--magit-section-available
+               (boundp 'magit-section-mode-map))
+      (set-keymap-parent map magit-section-mode-map))
+
+    ;; Refresh
+    (define-key map "g" #'ogent-gastown-refresh)
+    (define-key map "G" #'ogent-gastown-refresh-force)
+
+    ;; Navigation
+    (define-key map "n" #'ogent-gastown-next-item)
+    (define-key map "p" #'ogent-gastown-prev-item)
+    (define-key map (kbd "M-n") #'ogent-gastown-next-section)
+    (define-key map (kbd "M-p") #'ogent-gastown-prev-section)
+    (define-key map (kbd "TAB") #'ogent-gastown-toggle-section)
+    (define-key map (kbd "<backtab>") #'ogent-gastown-cycle-sections)
+    (define-key map (kbd "RET") #'ogent-gastown-visit)
+    (define-key map (kbd "^") #'ogent-gastown-up-section)
+
+    ;; Help/dispatch (magit-style: ?/h)
+    (define-key map "?" #'ogent-gastown-status-dispatch)
+    (define-key map "h" #'ogent-gastown-status-dispatch)
+
+    ;; Mail actions
+    (define-key map "m" #'ogent-gastown-mail-read)
+    (define-key map "M" #'ogent-gastown-mail-compose)
+
+    ;; Hook actions
+    (define-key map "H" #'ogent-gastown-hook-show)
+    (define-key map "a" #'ogent-gastown-hook-attach)
+
+    ;; Convoy actions
+    (define-key map "c" #'ogent-gastown-convoy-status)
+    (define-key map "C" #'ogent-gastown-convoy-create)
+
+    ;; Stats/Deacon/Witness actions
+    (define-key map "s" #'ogent-gastown-stats-show)
+    (define-key map "d" #'ogent-gastown-deacon-show)
+    (define-key map "w" #'ogent-gastown-witness-show)
+
+    ;; Crew actions
+    (define-key map "R" #'ogent-gastown-crew-status)
+
+    ;; Polecat actions
+    (define-key map "P" #'ogent-gastown-polecat-status)
+
+    ;; Rig actions
+    (define-key map "r" #'ogent-gastown-rig-status)
+    (define-key map "f" #'ogent-gastown-refinery-status)
+
+    ;; Quit
+    (define-key map "q" #'quit-window)
+
+    map)
+  "Keymap for `ogent-gastown-status-mode'.")
+
+;;; Mode Definition
+
+(defmacro ogent-gastown--define-status-mode ()
+  "Define `ogent-gastown-status-mode' with appropriate parent mode."
+  (let ((parent (if (bound-and-true-p ogent-gastown--magit-section-available)
+                    'magit-section-mode
+                  'special-mode)))
+    `(define-derived-mode ogent-gastown-status-mode ,parent "Gas Town"
+       "Major mode for viewing Gas Town status.
+
+Like `magit-status' but for your Gas Town multi-agent workspace.
+
+\\<ogent-gastown-status-mode-map>
+Navigation:
+  \\[ogent-gastown-next-item]     Move to next item
+  \\[ogent-gastown-prev-item]     Move to previous item
+  \\[ogent-gastown-next-section]   Move to next section
+  \\[ogent-gastown-prev-section]   Move to previous section
+  \\[ogent-gastown-visit]   Visit item details
+  \\[ogent-gastown-toggle-section]   Toggle section visibility
+  \\[ogent-gastown-cycle-sections]   Cycle all section visibility
+  \\[ogent-gastown-up-section]     Move to parent section
+
+Mail:
+  \\[ogent-gastown-mail-read]     Read selected mail
+  \\[ogent-gastown-mail-compose]     Compose new mail
+
+Hook:
+  \\[ogent-gastown-hook-show]     Show hook details
+  \\[ogent-gastown-hook-attach]     Attach work to hook
+
+Convoy:
+  \\[ogent-gastown-convoy-status]     Show convoy status
+  \\[ogent-gastown-convoy-create]     Create new convoy
+
+Status:
+  \\[ogent-gastown-stats-show]     Show town stats
+  \\[ogent-gastown-deacon-show]     Show deacon status
+  \\[ogent-gastown-witness-show]     Show witness status
+
+Crew/Polecat:
+  \\[ogent-gastown-crew-status]     Show crew status
+  \\[ogent-gastown-polecat-status]     Show polecat status
+
+Other:
+  \\[ogent-gastown-refresh]     Refresh
+  \\[ogent-gastown-status-dispatch]     Show command menu
+  \\[quit-window]     Quit
+
+\\{ogent-gastown-status-mode-map}"
+       :group 'ogent-gastown
+       (setq-local revert-buffer-function #'ogent-gastown-refresh)
+       (setq-local truncate-lines t)
+       (setq-local buffer-read-only t)
+       (setq header-line-format '(:eval (ogent-gastown--header-line)))
+       (when (bound-and-true-p ogent-gastown--magit-section-available)
+         (setq-local magit-section-visibility-indicator
+                     (if ogent-gastown-use-unicode '("..." . t) '("..." . t)))))))
+
+(ogent-gastown--define-status-mode)
+
+;; Backward compatibility alias
+(defalias 'ogent-gastown-mode 'ogent-gastown-status-mode)
+
+;;; Loading Animation
+
+(defconst ogent-gastown--loading-frames
+  (if (display-graphic-p)
+      '("" "" "" "")
+    '("|" "/" "-" "\\"))
+  "Animation frames for loading spinner.")
+
+(defun ogent-gastown--start-loading ()
+  "Start the loading animation."
+  (setq ogent-gastown--loading t
+        ogent-gastown--loading-frame 0)
+  (ogent-gastown--stop-loading-timer)
+  (setq ogent-gastown--loading-timer
+        (run-at-time 0.25 0.25 #'ogent-gastown--animate-loading (current-buffer)))
+  (force-mode-line-update))
+
+(defun ogent-gastown--stop-loading ()
+  "Stop the loading animation."
+  (ogent-gastown--stop-loading-timer)
+  (setq ogent-gastown--loading nil)
+  (force-mode-line-update))
+
+(defun ogent-gastown--stop-loading-timer ()
+  "Cancel the loading timer if active."
+  (when ogent-gastown--loading-timer
+    (cancel-timer ogent-gastown--loading-timer)
+    (setq ogent-gastown--loading-timer nil)))
+
+(defun ogent-gastown--animate-loading (buffer)
+  "Advance the loading animation frame in BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq ogent-gastown--loading-frame
+            (mod (1+ ogent-gastown--loading-frame) 4))
+      (force-mode-line-update))))
+
+(defun ogent-gastown--loading-indicator ()
+  "Return the current loading spinner character."
+  (when ogent-gastown--loading
+    (nth ogent-gastown--loading-frame ogent-gastown--loading-frames)))
+
+;;; Header Line
+
+(defun ogent-gastown--header-line ()
+  "Generate header line for Gas Town buffer."
+  (let ((loading-indicator (ogent-gastown--loading-indicator))
+        (mail-count (length (seq-filter
+                             (lambda (m) (not (plist-get m :read)))
+                             ogent-gastown--mail-data)))
+        (hook-active (and ogent-gastown--hook-data
+                          (plist-get ogent-gastown--hook-data :has_work)))
+        (rig ogent-gastown--current-rig))
+    (concat
+     (propertize " " 'face 'ogent-gastown-header-line)
+     (propertize "Gas Town" 'face 'ogent-gastown-header-line)
+     (when rig
+       (concat (propertize "  " 'face 'ogent-gastown-dimmed)
+               (propertize rig 'face 'ogent-gastown-header-line-rig)))
+     (if loading-indicator
+         (concat (propertize "  " 'face 'ogent-gastown-dimmed)
+                 (propertize loading-indicator 'face 'ogent-gastown-hook-active)
+                 (propertize " Loading..." 'face 'ogent-gastown-dimmed))
+       (concat
+        (propertize "  " 'face 'ogent-gastown-dimmed)
+        (if hook-active
+            (propertize "Hook: active" 'face 'ogent-gastown-hook-active)
+          (propertize "Hook: empty" 'face 'ogent-gastown-hook-empty))
+        (when (> mail-count 0)
+          (concat (propertize "  " 'face 'ogent-gastown-dimmed)
+                  (propertize (format "%d unread" mail-count)
+                              'face 'ogent-gastown-mail-unread)))
+        (propertize "  " 'face 'ogent-gastown-dimmed)
+        (propertize "g" 'face 'ogent-gastown-header-line-key)
+        (propertize ":refresh " 'face 'ogent-gastown-dimmed)
+        (propertize "?" 'face 'ogent-gastown-header-line-key)
+        (propertize ":help " 'face 'ogent-gastown-dimmed)
+        (propertize "q" 'face 'ogent-gastown-header-line-key)
+        (propertize ":quit" 'face 'ogent-gastown-dimmed))))))
+
+;;; Buffer Name
+
+(defun ogent-gastown--buffer-name (&optional rig)
+  "Return buffer name, optionally for RIG.
+When `ogent-gastown-per-project-buffers' is non-nil, returns a
+rig-specific name like `*Gas Town: <rig>*'."
+  (if (and ogent-gastown-per-project-buffers rig)
+      (format "*Gas Town: %s*" rig)
+    ogent-gastown-buffer-name))
+
+;;; Data Fetching
+
+(defun ogent-gastown--fetch-all (callback)
+  "Fetch all data for the status buffer, call CALLBACK when done."
+  (let* ((pending 7)
+         (results (make-hash-table))
+         (buf (current-buffer))
+         (check-done
+          (lambda ()
+            (cl-decf pending)
+            (when (zerop pending)
+              (when (buffer-live-p buf)
+                (with-current-buffer buf
+                  (setq ogent-gastown--hook-data (gethash 'hook results))
+                  (setq ogent-gastown--mail-data (gethash 'mail results))
+                  (setq ogent-gastown--convoy-data (gethash 'convoy results))
+                  (setq ogent-gastown--workers-data (gethash 'workers results))
+                  (setq ogent-gastown--crew-data (gethash 'crew results))
+                  (setq ogent-gastown--polecat-data (gethash 'polecat results))
+                  ;; Extract stats, deacon, witnesses, and rigs from town status
+                  (let ((town-status (gethash 'town-status results)))
+                    (setq ogent-gastown--stats-data
+                          (plist-get town-status :summary))
+                    (setq ogent-gastown--deacon-data
+                          (ogent-gastown--extract-deacon town-status))
+                    (setq ogent-gastown--witness-data
+                          (ogent-gastown--extract-witnesses town-status))
+                    (setq ogent-gastown--rigs-data
+                          (plist-get town-status :rigs)))
+                  (funcall callback)))))))
+
+    ;; Fetch hook status
+    (ogent-gastown--run-async
+     '("hook" "--json")
+     (lambda (result)
+       (puthash 'hook result results)
+       (funcall check-done))
+     (lambda (_err)
+       (puthash 'hook nil results)
+       (funcall check-done)))
+
+    ;; Fetch mail
+    (ogent-gastown--run-async
+     '("mail" "inbox" "--json")
+     (lambda (result)
+       (puthash 'mail result results)
+       (funcall check-done))
+     (lambda (_err)
+       (puthash 'mail nil results)
+       (funcall check-done)))
+
+    ;; Fetch convoys
+    (ogent-gastown--run-async
+     '("convoy" "list" "--json")
+     (lambda (result)
+       (puthash 'convoy result results)
+       (funcall check-done))
+     (lambda (_err)
+       (puthash 'convoy nil results)
+       (funcall check-done)))
+
+    ;; Fetch workers
+    (ogent-gastown--run-async
+     '("polecat" "list" "--all" "--json")
+     (lambda (result)
+       (puthash 'workers result results)
+       (funcall check-done))
+     (lambda (_err)
+       (puthash 'workers nil results)
+       (funcall check-done)))
+
+    ;; Fetch town status (for stats, deacon, witnesses)
+    (ogent-gastown--run-async
+     '("status" "--json")
+     (lambda (result)
+       (puthash 'town-status result results)
+       (funcall check-done))
+     (lambda (_err)
+       (puthash 'town-status nil results)
+       (funcall check-done)))
+
+    ;; Fetch crew members
+    (ogent-gastown--run-async
+     '("crew" "list" "--json")
+     (lambda (result)
+       (puthash 'crew result results)
+       (funcall check-done))
+     (lambda (_err)
+       (puthash 'crew nil results)
+       (funcall check-done)))
+
+    ;; Fetch polecats
+    (ogent-gastown--run-async
+     '("polecat" "list" "--json")
+     (lambda (result)
+       (puthash 'polecat result results)
+       (funcall check-done))
+     (lambda (_err)
+       (puthash 'polecat nil results)
+       (funcall check-done)))))
+
+(defun ogent-gastown--extract-deacon (town-status)
+  "Extract deacon info from TOWN-STATUS."
+  (when town-status
+    (let ((agents (plist-get town-status :agents)))
+      (seq-find (lambda (agent)
+                  (string= (plist-get agent :name) "deacon"))
+                agents))))
+
+(defun ogent-gastown--extract-witnesses (town-status)
+  "Extract witness info from TOWN-STATUS."
+  (when town-status
+    (let ((rigs (plist-get town-status :rigs)))
+      (mapcar (lambda (rig)
+                (list :rig (plist-get rig :name)
+                      :has_witness (plist-get rig :has_witness)
+                      :polecat_count (or (plist-get rig :polecat_count) 0)
+                      :crew_count (or (plist-get rig :crew_count) 0)))
+              rigs))))
+
+;;; Buffer Rendering
+
+(defun ogent-gastown--insert-buffer-contents ()
+  "Insert all sections into the buffer."
+  (if ogent-gastown--magit-section-available
+      (ogent-gastown--insert-with-magit-section)
+    (ogent-gastown--insert-plain)))
+
+(defun ogent-gastown--insert-with-magit-section ()
+  "Insert content using magit-section."
+  (magit-insert-section (ogent-gastown-root-section)
+    (ogent-gastown--insert-stats-section)
+    (insert "\n")
+    (ogent-gastown--insert-deacon-section)
+    (insert "\n")
+    (ogent-gastown--insert-witness-section)
+    (insert "\n")
+    (ogent-gastown--insert-hook-section)
+    (insert "\n")
+    (ogent-gastown--insert-mail-section)
+    (insert "\n")
+    (ogent-gastown--insert-convoy-section)
+    (insert "\n")
+    (ogent-gastown--insert-rigs-section)
+    (insert "\n")
+    (ogent-gastown--insert-crew-section)
+    (insert "\n")
+    (ogent-gastown--insert-polecat-section)
+    (insert "\n")
+    (ogent-gastown--insert-workers-section)))
+
+(defun ogent-gastown--insert-plain ()
+  "Insert content without magit-section (fallback)."
+  (ogent-gastown--insert-stats-section-plain)
+  (insert "\n")
+  (ogent-gastown--insert-deacon-section-plain)
+  (insert "\n")
+  (ogent-gastown--insert-witness-section-plain)
+  (insert "\n")
+  (ogent-gastown--insert-hook-section-plain)
+  (insert "\n")
+  (ogent-gastown--insert-mail-section-plain)
+  (insert "\n")
+  (ogent-gastown--insert-convoy-section-plain)
+  (insert "\n")
+  (ogent-gastown--insert-rigs-section-plain)
+  (insert "\n")
+  (ogent-gastown--insert-crew-section-plain)
+  (insert "\n")
+  (ogent-gastown--insert-polecat-section-plain)
+  (insert "\n")
+  (ogent-gastown--insert-workers-section-plain))
+
+;;; Section Insertion Helpers (with magit-section)
+
+(defun ogent-gastown--insert-stats-section ()
+  "Insert town statistics section with magit-section."
+  (let ((stats ogent-gastown--stats-data))
+    (magit-insert-section (ogent-gastown-stats-section stats)
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "📊" "#")
+         " "
+         (propertize "Town Stats" 'face 'ogent-gastown-section-heading)))
+      (if (null stats)
+          (insert (propertize "  No stats available\n" 'face 'ogent-gastown-dimmed))
+        (insert "  ")
+        (ogent-gastown--insert-stat-item "Rigs" (plist-get stats :rig_count))
+        (insert "  ")
+        (ogent-gastown--insert-stat-item "Polecats" (plist-get stats :polecat_count))
+        (insert "  ")
+        (ogent-gastown--insert-stat-item "Crew" (plist-get stats :crew_count))
+        (insert "\n  ")
+        (ogent-gastown--insert-stat-item "Witnesses" (plist-get stats :witness_count))
+        (insert "  ")
+        (ogent-gastown--insert-stat-item "Refineries" (plist-get stats :refinery_count))
+        (insert "  ")
+        (ogent-gastown--insert-stat-item "Hooks" (plist-get stats :active_hooks))
+        (insert "\n")))))
+
+(defun ogent-gastown--insert-stat-item (label value)
+  "Insert a stat LABEL: VALUE pair."
+  (insert (propertize label 'face 'ogent-gastown-stats-label))
+  (insert ": ")
+  (insert (propertize (format "%s" (or value 0)) 'face 'ogent-gastown-stats-value)))
+
+(defun ogent-gastown--insert-deacon-section ()
+  "Insert deacon status section with magit-section."
+  (let* ((data ogent-gastown--deacon-data)
+         (running (plist-get data :running))
+         (has-work (plist-get data :has_work))
+         (address (plist-get data :address)))
+    (magit-insert-section (ogent-gastown-deacon-section data)
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "👁" "D")
+         " "
+         (propertize "Deacon" 'face 'ogent-gastown-section-heading)
+         " "
+         (if running
+             (propertize "[running]" 'face 'ogent-gastown-deacon-running)
+           (propertize "[stopped]" 'face 'ogent-gastown-deacon-stopped))))
+      (if (null data)
+          (insert (propertize "  No deacon info available\n" 'face 'ogent-gastown-dimmed))
+        (insert "  ")
+        (insert (propertize "Address: " 'face 'ogent-gastown-dimmed))
+        (insert (or address "deacon/"))
+        (insert "\n")
+        (insert "  ")
+        (if running
+            (if has-work
+                (insert (propertize "Has work on hook" 'face 'ogent-gastown-hook-active))
+              (insert (propertize "Patrolling (no hooked work)" 'face 'ogent-gastown-deacon-running)))
+          (insert (propertize "Not running - start with: gt deacon start" 'face 'ogent-gastown-dimmed)))
+        (insert "\n")))))
+
+(defun ogent-gastown--insert-witness-section ()
+  "Insert witness status section with magit-section."
+  (let* ((witnesses ogent-gastown--witness-data)
+         (active-count (length (seq-filter
+                                (lambda (w) (plist-get w :has_witness))
+                                witnesses))))
+    (magit-insert-section (ogent-gastown-witness-section witnesses nil)
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "🔭" "W")
+         " "
+         (propertize "Witnesses" 'face 'ogent-gastown-section-heading)
+         (propertize (format " (%d/%d active)"
+                             active-count (length witnesses))
+                     'face 'ogent-gastown-dimmed)))
+      (if (null witnesses)
+          (insert (propertize "  No rig data available\n" 'face 'ogent-gastown-dimmed))
+        (dolist (witness witnesses)
+          (ogent-gastown--insert-witness-item witness))))))
+
+(defun ogent-gastown--insert-witness-item (witness)
+  "Insert a single rig WITNESS status as a line."
+  (let* ((rig (plist-get witness :rig))
+         (has-witness (plist-get witness :has_witness))
+         (polecat-count (or (plist-get witness :polecat_count) 0))
+         (crew-count (or (plist-get witness :crew_count) 0))
+         (icon (if has-witness
+                   (if ogent-gastown-use-unicode "●" "+")
+                 (if ogent-gastown-use-unicode "○" "-")))
+         (face (if has-witness
+                   'ogent-gastown-witness-healthy
+                 'ogent-gastown-witness-unhealthy)))
+    (magit-insert-section (ogent-gastown-witness-item-section witness)
+      (insert "  ")
+      (insert (propertize icon 'face face))
+      (insert " ")
+      (insert (propertize rig 'face face))
+      (insert " ")
+      (insert (propertize (format "[%d polecats, %d crew]"
+                                  polecat-count crew-count)
+                          'face 'ogent-gastown-dimmed))
+      (insert "\n"))))
+
+(defun ogent-gastown--insert-hook-section ()
+  "Insert hook status section with magit-section."
+  (let* ((data ogent-gastown--hook-data)
+         (has-work (plist-get data :has_work))
+         (role (or (plist-get data :role) "unknown"))
+         (target (or (plist-get data :target) "unknown"))
+         (next-action (plist-get data :next_action)))
+    (magit-insert-section (ogent-gastown-hook-section data)
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "" "#")
+         " "
+         (propertize "Hook Status" 'face 'ogent-gastown-section-heading)))
+      (insert "  ")
+      (insert (propertize "Role: " 'face 'ogent-gastown-dimmed))
+      (insert (propertize role 'face 'ogent-gastown-section-heading))
+      (insert "  ")
+      (insert (propertize "Target: " 'face 'ogent-gastown-dimmed))
+      (insert target)
+      (insert "\n")
+      (insert "  ")
+      (if has-work
+          (insert (propertize "Work hooked - ready to execute"
+                              'face 'ogent-gastown-hook-active))
+        (progn
+          (insert (propertize "No work hooked" 'face 'ogent-gastown-hook-empty))
+          (when next-action
+            (insert "\n  ")
+            (insert (propertize next-action 'face 'ogent-gastown-dimmed)))))
+      (insert "\n"))))
+
+(defun ogent-gastown--insert-mail-section ()
+  "Insert mail inbox section with magit-section."
+  (let* ((mail ogent-gastown--mail-data)
+         (unread-count (length (seq-filter (lambda (m) (not (plist-get m :read))) mail))))
+    (magit-insert-section (ogent-gastown-mail-section mail nil)
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "" "@")
+         " "
+         (propertize "Mail Inbox" 'face 'ogent-gastown-section-heading)
+         (when (> unread-count 0)
+           (propertize (format " (%d unread)" unread-count)
+                       'face 'ogent-gastown-mail-unread))))
+      (if (null mail)
+          (insert (propertize "  No messages\n" 'face 'ogent-gastown-dimmed))
+        (dolist (msg mail)
+          (ogent-gastown--insert-mail-item msg))))))
+
+(defun ogent-gastown--insert-mail-item (msg)
+  "Insert a single mail MSG as a section."
+  (let* ((id (plist-get msg :id))
+         (from (plist-get msg :from))
+         (subject (plist-get msg :subject))
+         (read (plist-get msg :read))
+         (timestamp (plist-get msg :timestamp))
+         (time-str (ogent-gastown--format-time timestamp)))
+    (magit-insert-section (ogent-gastown-mail-item-section msg)
+      (insert "  ")
+      (insert (if read
+                  (propertize "" 'face 'ogent-gastown-mail-read)
+                (propertize "" 'face 'ogent-gastown-mail-unread)))
+      (insert " ")
+      (insert (propertize id 'face 'ogent-gastown-dimmed))
+      (insert " ")
+      (insert (propertize (truncate-string-to-width (or from "") 20 nil nil "...")
+                          'face 'ogent-gastown-mail-from))
+      (insert " ")
+      (insert (propertize (truncate-string-to-width (or subject "") 40 nil nil "...")
+                          'face (if read 'ogent-gastown-mail-read nil)))
+      (insert " ")
+      (insert (propertize time-str 'face 'ogent-gastown-dimmed))
+      (insert "\n"))))
+
+(defun ogent-gastown--insert-convoy-section ()
+  "Insert convoy status section with magit-section."
+  (let ((convoys ogent-gastown--convoy-data))
+    (magit-insert-section (ogent-gastown-convoy-section convoys nil)
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "" ">")
+         " "
+         (propertize "Convoys" 'face 'ogent-gastown-section-heading)
+         (when convoys
+           (propertize (format " (%d)" (length convoys))
+                       'face 'ogent-gastown-dimmed))))
+      (if (null convoys)
+          (insert (propertize "  No active convoys\n" 'face 'ogent-gastown-dimmed))
+        (dolist (convoy convoys)
+          (ogent-gastown--insert-convoy-item convoy))))))
+
+(defun ogent-gastown--insert-convoy-item (convoy)
+  "Insert a single CONVOY as a section."
+  (let* ((id (plist-get convoy :id))
+         (name (plist-get convoy :name))
+         (status (plist-get convoy :status))
+         (progress (plist-get convoy :progress)))
+    (magit-insert-section (ogent-gastown-convoy-item-section convoy)
+      (insert "  ")
+      (insert (propertize (or id "???") 'face 'ogent-gastown-dimmed))
+      (insert " ")
+      (insert (propertize (or name "(unnamed)")
+                          'face (if (string= status "complete")
+                                    'ogent-gastown-convoy-complete
+                                  'ogent-gastown-convoy-active)))
+      (when progress
+        (insert " ")
+        (insert (propertize progress 'face 'ogent-gastown-dimmed)))
+      (insert "\n"))))
+
+(defun ogent-gastown--insert-rigs-section ()
+  "Insert rigs overview section with magit-section."
+  (let ((rigs ogent-gastown--rigs-data))
+    (magit-insert-section (ogent-gastown-rigs-section rigs nil)
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "🏭" "R")
+         " "
+         (propertize "Rigs" 'face 'ogent-gastown-section-heading)
+         (propertize (format " (%d)" (length rigs))
+                     'face 'ogent-gastown-dimmed)))
+      (if (null rigs)
+          (insert (propertize "  No rigs configured\n" 'face 'ogent-gastown-dimmed))
+        (dolist (rig rigs)
+          (ogent-gastown--insert-rig-item rig))))))
+
+(defun ogent-gastown--insert-rig-item (rig)
+  "Insert a single RIG as a section."
+  (let* ((name (plist-get rig :name))
+         (polecat-count (or (plist-get rig :polecat_count) 0))
+         (crew-count (or (plist-get rig :crew_count) 0))
+         (has-witness (plist-get rig :has_witness))
+         (has-refinery (plist-get rig :has_refinery))
+         (agents (plist-get rig :agents))
+         (any-running (seq-some (lambda (a) (plist-get a :running)) agents)))
+    (magit-insert-section (ogent-gastown-rig-item-section rig t)
+      (insert "  ")
+      (insert (propertize name 'face 'ogent-gastown-rig-name))
+      (insert " ")
+      (insert (propertize (format "P:%d C:%d" polecat-count crew-count)
+                          'face 'ogent-gastown-dimmed))
+      (insert " ")
+      (if any-running
+          (insert (propertize "[running]" 'face 'ogent-gastown-rig-running))
+        (insert (propertize "[stopped]" 'face 'ogent-gastown-rig-stopped)))
+      (when has-witness
+        (insert (propertize " W" 'face 'ogent-gastown-witness-healthy)))
+      (when has-refinery
+        (insert (propertize " R" 'face 'ogent-gastown-convoy-active)))
+      (insert "\n")
+      ;; Insert agents if expanded
+      (when agents
+        (dolist (agent agents)
+          (ogent-gastown--insert-rig-agent agent))))))
+
+(defun ogent-gastown--insert-rig-agent (agent)
+  "Insert a single AGENT line within a rig section."
+  (let* ((name (plist-get agent :name))
+         (role (plist-get agent :role))
+         (running (plist-get agent :running))
+         (has-work (plist-get agent :has_work))
+         (unread (or (plist-get agent :unread_mail) 0))
+         (role-icon (pcase role
+                      ("witness" (if ogent-gastown-use-unicode "👁" "W"))
+                      ("refinery" (if ogent-gastown-use-unicode "⚙" "R"))
+                      ("polecat" (if ogent-gastown-use-unicode "🐱" "P"))
+                      ("crew" (if ogent-gastown-use-unicode "👤" "C"))
+                      (_ "?"))))
+    (insert "    ")
+    (insert role-icon)
+    (insert " ")
+    (insert (propertize (or name "???")
+                        'face (if running 'ogent-gastown-worker-running 'ogent-gastown-dimmed)))
+    (when has-work
+      (insert " ")
+      (insert (propertize (if ogent-gastown-use-unicode "⚓" "H") 'face 'ogent-gastown-hook-active)))
+    (when (> unread 0)
+      (insert " ")
+      (insert (propertize (format "%s%d"
+                                  (if ogent-gastown-use-unicode "📬" "M:")
+                                  unread)
+                          'face 'ogent-gastown-mail-unread)))
+    (insert "\n")))
+
+(defun ogent-gastown--insert-crew-section ()
+  "Insert crew status section with magit-section."
+  (let ((crew ogent-gastown--crew-data)
+        (active-count 0))
+    (dolist (member crew)
+      (when (plist-get member :session_running)
+        (cl-incf active-count)))
+    (magit-insert-section (ogent-gastown-crew-section crew nil)
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "👤" "C")
+         " "
+         (propertize "Crew" 'face 'ogent-gastown-section-heading)
+         (propertize (format " (%d/%d active)"
+                             active-count (length crew))
+                     'face 'ogent-gastown-dimmed)))
+      (if (null crew)
+          (insert (propertize "  No crew members\n" 'face 'ogent-gastown-dimmed))
+        ;; Group by rig
+        (let ((by-rig (seq-group-by (lambda (m) (plist-get m :rig)) crew)))
+          (dolist (rig-group by-rig)
+            (let ((rig (car rig-group))
+                  (rig-crew (cdr rig-group)))
+              (insert "  ")
+              (insert (propertize (or rig "unknown") 'face 'ogent-gastown-section-heading))
+              (insert ":\n")
+              (dolist (member rig-crew)
+                (ogent-gastown--insert-crew-item member)))))))))
+
+(defun ogent-gastown--insert-crew-item (member)
+  "Insert a single crew MEMBER as a line."
+  (let* ((name (plist-get member :name))
+         (hooked-work (plist-get member :hooked_work))
+         (branch (plist-get member :branch))
+         (dirty (plist-get member :dirty))
+         (running (plist-get member :session_running))
+         (mail-count (plist-get member :unread_mail))
+         (state-face (if running 'ogent-gastown-crew-active 'ogent-gastown-crew-idle))
+         (icon (if running
+                   (if ogent-gastown-use-unicode "●" ">")
+                 (if ogent-gastown-use-unicode "○" "-"))))
+    (magit-insert-section (ogent-gastown-crew-item-section member)
+      (insert "    ")
+      (insert (propertize icon 'face state-face))
+      (insert " ")
+      (insert (propertize (or name "???") 'face state-face))
+      ;; Git branch info
+      (when branch
+        (insert " ")
+        (insert (propertize (format "[%s%s]"
+                                    branch
+                                    (if dirty "*" ""))
+                            'face 'ogent-gastown-dimmed)))
+      ;; Hooked work
+      (when hooked-work
+        (insert " ")
+        (insert (propertize (format "-> %s" hooked-work) 'face 'ogent-gastown-hook-active)))
+      ;; Mail count
+      (when (and mail-count (> mail-count 0))
+        (insert " ")
+        (insert (propertize (format "📬%d" mail-count) 'face 'ogent-gastown-mail-unread)))
+      (insert "\n"))))
+
+(defun ogent-gastown--insert-polecat-section ()
+  "Insert polecat status section with magit-section."
+  (let ((polecats ogent-gastown--polecat-data)
+        (running-count 0))
+    (dolist (p polecats)
+      (when (plist-get p :session_running)
+        (cl-incf running-count)))
+    (magit-insert-section (ogent-gastown-polecat-section polecats nil)
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "🔧" "P")
+         " "
+         (propertize "Polecats" 'face 'ogent-gastown-section-heading)
+         (propertize (format " (%d/%d running)"
+                             running-count (length polecats))
+                     'face 'ogent-gastown-dimmed)))
+      (if (null polecats)
+          (insert (propertize "  No polecats\n" 'face 'ogent-gastown-dimmed))
+        ;; Group by rig
+        (let ((by-rig (seq-group-by (lambda (p) (plist-get p :rig)) polecats)))
+          (dolist (rig-group by-rig)
+            (let ((rig (car rig-group))
+                  (rig-polecats (cdr rig-group)))
+              (insert "  ")
+              (insert (propertize (or rig "unknown") 'face 'ogent-gastown-section-heading))
+              (insert ":\n")
+              (dolist (polecat rig-polecats)
+                (ogent-gastown--insert-polecat-item polecat)))))))))
+
+(defun ogent-gastown--insert-polecat-item (polecat)
+  "Insert a single POLECAT as a line."
+  (let* ((name (plist-get polecat :name))
+         (state (plist-get polecat :state))
+         (running (plist-get polecat :session_running))
+         (task (or (plist-get polecat :current_task)
+                   (plist-get polecat :hooked_work)))
+         (started (plist-get polecat :session_started))
+         (state-face (cond
+                      (running 'ogent-gastown-polecat-active)
+                      ((string= state "working") 'ogent-gastown-worker-working)
+                      (t 'ogent-gastown-polecat-idle)))
+         (icon (cond
+                (running (if ogent-gastown-use-unicode "●" ">"))
+                ((string= state "working") (if ogent-gastown-use-unicode "◐" "*"))
+                (t (if ogent-gastown-use-unicode "○" "-")))))
+    (magit-insert-section (ogent-gastown-polecat-item-section polecat)
+      (insert "    ")
+      (insert (propertize icon 'face state-face))
+      (insert " ")
+      (insert (propertize (or name "???") 'face state-face))
+      ;; State
+      (insert " ")
+      (insert (propertize (format "[%s]" (or state "unknown")) 'face 'ogent-gastown-dimmed))
+      ;; Current task/bead
+      (when task
+        (insert " ")
+        (insert (propertize (format "-> %s" task) 'face 'ogent-gastown-hook-active)))
+      ;; Time active
+      (when (and running started)
+        (let ((time-str (ogent-gastown--format-time started)))
+          (insert " ")
+          (insert (propertize (format "(since %s)" time-str) 'face 'ogent-gastown-dimmed))))
+      (insert "\n"))))
+
+(defun ogent-gastown--insert-workers-section ()
+  "Insert workers overview section with magit-section."
+  (let ((workers ogent-gastown--workers-data)
+        (running-count 0))
+    (dolist (w workers)
+      (when (plist-get w :session_running)
+        (cl-incf running-count)))
+    (magit-insert-section (ogent-gastown-workers-section workers
+                            (memq 'workers ogent-gastown-collapsed-sections))
+      (magit-insert-heading
+        (concat
+         (if ogent-gastown-use-unicode "" "*")
+         " "
+         (propertize "Workers" 'face 'ogent-gastown-section-heading)
+         (propertize (format " (%d/%d running)"
+                             running-count (length workers))
+                     'face 'ogent-gastown-dimmed)))
+      (if (null workers)
+          (insert (propertize "  No workers\n" 'face 'ogent-gastown-dimmed))
+        ;; Group by rig
+        (let ((by-rig (seq-group-by (lambda (w) (plist-get w :rig)) workers)))
+          (dolist (rig-group by-rig)
+            (let ((rig (car rig-group))
+                  (rig-workers (cdr rig-group)))
+              (insert "  ")
+              (insert (propertize rig 'face 'ogent-gastown-section-heading))
+              (insert ":\n")
+              (dolist (worker rig-workers)
+                (ogent-gastown--insert-worker-item worker)))))))))
+
+(defun ogent-gastown--insert-worker-item (worker)
+  "Insert a single WORKER as a line."
+  (let* ((name (plist-get worker :name))
+         (state (plist-get worker :state))
+         (running (plist-get worker :session_running))
+         (state-face (cond
+                      (running 'ogent-gastown-worker-running)
+                      ((string= state "working") 'ogent-gastown-worker-working)
+                      (t 'ogent-gastown-worker-done)))
+         (icon (cond
+                (running (if ogent-gastown-use-unicode "" ">"))
+                ((string= state "working") (if ogent-gastown-use-unicode "" "*"))
+                (t (if ogent-gastown-use-unicode "" "-")))))
+    (insert "    ")
+    (insert (propertize icon 'face state-face))
+    (insert " ")
+    (insert (propertize name 'face state-face))
+    (insert " ")
+    (insert (propertize (format "[%s]" state) 'face 'ogent-gastown-dimmed))
+    (when running
+      (insert " ")
+      (insert (propertize "running" 'face 'ogent-gastown-worker-running)))
+    (insert "\n")))
+
+;;; Plain Section Insertion (fallback without magit-section)
+
+(defun ogent-gastown--insert-stats-section-plain ()
+  "Insert stats section (plain)."
+  (let ((stats ogent-gastown--stats-data))
+    (insert (propertize "# Town Stats\n" 'face 'ogent-gastown-section-heading))
+    (if (null stats)
+        (insert (propertize "  No stats available\n" 'face 'ogent-gastown-dimmed))
+      (insert (format "  Rigs: %d  Polecats: %d  Crew: %d\n"
+                      (or (plist-get stats :rig_count) 0)
+                      (or (plist-get stats :polecat_count) 0)
+                      (or (plist-get stats :crew_count) 0)))
+      (insert (format "  Witnesses: %d  Refineries: %d  Hooks: %d\n"
+                      (or (plist-get stats :witness_count) 0)
+                      (or (plist-get stats :refinery_count) 0)
+                      (or (plist-get stats :active_hooks) 0))))))
+
+(defun ogent-gastown--insert-deacon-section-plain ()
+  "Insert deacon section (plain)."
+  (let* ((data ogent-gastown--deacon-data)
+         (running (plist-get data :running)))
+    (insert (propertize "D Deacon\n" 'face 'ogent-gastown-section-heading))
+    (insert "  Status: ")
+    (if running
+        (insert (propertize "running\n" 'face 'ogent-gastown-deacon-running))
+      (insert (propertize "stopped\n" 'face 'ogent-gastown-deacon-stopped)))))
+
+(defun ogent-gastown--insert-witness-section-plain ()
+  "Insert witness section (plain)."
+  (let ((witnesses ogent-gastown--witness-data))
+    (insert (propertize "W Witnesses\n" 'face 'ogent-gastown-section-heading))
+    (if (null witnesses)
+        (insert (propertize "  No rig data available\n" 'face 'ogent-gastown-dimmed))
+      (dolist (witness witnesses)
+        (let* ((rig (plist-get witness :rig))
+               (has-witness (plist-get witness :has_witness)))
+          (insert "  ")
+          (insert (if has-witness "+" "-"))
+          (insert " ")
+          (insert rig)
+          (insert "\n"))))))
+
+(defun ogent-gastown--insert-hook-section-plain ()
+  "Insert hook status section (plain)."
+  (let* ((data ogent-gastown--hook-data)
+         (has-work (plist-get data :has_work))
+         (role (or (plist-get data :role) "unknown")))
+    (insert (propertize "# Hook Status\n" 'face 'ogent-gastown-section-heading))
+    (insert "  Role: " role "\n")
+    (insert "  ")
+    (if has-work
+        (insert (propertize "Work hooked" 'face 'ogent-gastown-hook-active))
+      (insert (propertize "No work hooked" 'face 'ogent-gastown-hook-empty)))
+    (insert "\n")))
+
+(defun ogent-gastown--insert-mail-section-plain ()
+  "Insert mail section (plain)."
+  (let ((mail ogent-gastown--mail-data))
+    (insert (propertize "@ Mail Inbox\n" 'face 'ogent-gastown-section-heading))
+    (if (null mail)
+        (insert (propertize "  No messages\n" 'face 'ogent-gastown-dimmed))
+      (dolist (msg mail)
+        (let* ((from (plist-get msg :from))
+               (subject (plist-get msg :subject))
+               (read (plist-get msg :read)))
+          (insert "  ")
+          (insert (if read "  " "* "))
+          (insert (or from "unknown"))
+          (insert " - ")
+          (insert (or subject "(no subject)"))
+          (insert "\n"))))))
+
+(defun ogent-gastown--insert-convoy-section-plain ()
+  "Insert convoy section (plain)."
+  (let ((convoys ogent-gastown--convoy-data))
+    (insert (propertize "> Convoys\n" 'face 'ogent-gastown-section-heading))
+    (if (null convoys)
+        (insert (propertize "  No active convoys\n" 'face 'ogent-gastown-dimmed))
+      (dolist (convoy convoys)
+        (insert "  ")
+        (insert (or (plist-get convoy :name) "(unnamed)"))
+        (insert "\n")))))
+
+(defun ogent-gastown--insert-rigs-section-plain ()
+  "Insert rigs section (plain)."
+  (let ((rigs ogent-gastown--rigs-data))
+    (insert (propertize "R Rigs\n" 'face 'ogent-gastown-section-heading))
+    (if (null rigs)
+        (insert (propertize "  No rigs configured\n" 'face 'ogent-gastown-dimmed))
+      (dolist (rig rigs)
+        (let* ((name (plist-get rig :name))
+               (polecat-count (or (plist-get rig :polecat_count) 0))
+               (crew-count (or (plist-get rig :crew_count) 0)))
+          (insert "  ")
+          (insert (or name "???"))
+          (insert " ")
+          (insert (format "P:%d C:%d" polecat-count crew-count))
+          (insert "\n"))))))
+
+(defun ogent-gastown--insert-crew-section-plain ()
+  "Insert crew section (plain)."
+  (let ((crew ogent-gastown--crew-data))
+    (insert (propertize "C Crew\n" 'face 'ogent-gastown-section-heading))
+    (if (null crew)
+        (insert (propertize "  No crew members\n" 'face 'ogent-gastown-dimmed))
+      (dolist (member crew)
+        (insert "  ")
+        (insert (or (plist-get member :rig) "???"))
+        (insert "/")
+        (insert (or (plist-get member :name) "???"))
+        (when (plist-get member :session_running)
+          (insert " [active]"))
+        (insert "\n")))))
+
+(defun ogent-gastown--insert-polecat-section-plain ()
+  "Insert polecat section (plain)."
+  (let ((polecats ogent-gastown--polecat-data))
+    (insert (propertize "P Polecats\n" 'face 'ogent-gastown-section-heading))
+    (if (null polecats)
+        (insert (propertize "  No polecats\n" 'face 'ogent-gastown-dimmed))
+      (dolist (polecat polecats)
+        (insert "  ")
+        (insert (or (plist-get polecat :rig) "???"))
+        (insert "/")
+        (insert (or (plist-get polecat :name) "???"))
+        (insert " [")
+        (insert (or (plist-get polecat :state) "unknown"))
+        (insert "]")
+        (when (plist-get polecat :session_running)
+          (insert " running"))
+        (insert "\n")))))
+
+(defun ogent-gastown--insert-workers-section-plain ()
+  "Insert workers section (plain)."
+  (let ((workers ogent-gastown--workers-data))
+    (insert (propertize "* Workers\n" 'face 'ogent-gastown-section-heading))
+    (if (null workers)
+        (insert (propertize "  No workers\n" 'face 'ogent-gastown-dimmed))
+      (dolist (worker workers)
+        (insert "  ")
+        (insert (plist-get worker :rig))
+        (insert "/")
+        (insert (plist-get worker :name))
+        (insert " [")
+        (insert (plist-get worker :state))
+        (insert "]\n")))))
+
+;;; Utilities
+
+(defun ogent-gastown--format-time (iso-time)
+  "Format ISO-TIME as relative time string."
+  (if (and iso-time (stringp iso-time) (not (string-empty-p iso-time)))
+      (condition-case nil
+          (let* ((time (parse-iso8601-time-string iso-time))
+                 (diff (float-time (time-subtract (current-time) time))))
+            (cond
+             ((< diff 60) "just now")
+             ((< diff 3600) (format "%dm ago" (/ (truncate diff) 60)))
+             ((< diff 86400) (format "%dh ago" (/ (truncate diff) 3600)))
+             (t (format-time-string "%b %d" time))))
+        (error "???"))
+    "???"))
+
+;;; Navigation
+
+(defun ogent-gastown--current-item ()
+  "Return the item at point (mail, convoy, crew, polecat, etc.)."
+  (when ogent-gastown--magit-section-available
+    (when-let ((section (magit-current-section)))
+      (when (slot-boundp section 'value)
+        (oref section value)))))
+
+(defun ogent-gastown-next-item ()
+  "Move to the next item."
+  (interactive)
+  (if ogent-gastown--magit-section-available
+      (magit-section-forward)
+    (forward-line)))
+
+(defun ogent-gastown-prev-item ()
+  "Move to the previous item."
+  (interactive)
+  (if ogent-gastown--magit-section-available
+      (magit-section-backward)
+    (forward-line -1)))
+
+(defun ogent-gastown-toggle-section ()
+  "Toggle the current section."
+  (interactive)
+  (if ogent-gastown--magit-section-available
+      (if-let ((section (magit-current-section)))
+          (magit-section-toggle section)
+        (message "No section at point"))
+    (message "Section toggling requires magit-section")))
+
+(defun ogent-gastown-next-section ()
+  "Move to the next sibling section."
+  (interactive)
+  (when ogent-gastown--magit-section-available
+    (magit-section-forward-sibling)))
+
+(defun ogent-gastown-prev-section ()
+  "Move to the previous sibling section."
+  (interactive)
+  (when ogent-gastown--magit-section-available
+    (magit-section-backward-sibling)))
+
+(defun ogent-gastown-up-section ()
+  "Move to the parent section."
+  (interactive)
+  (when ogent-gastown--magit-section-available
+    (magit-section-up)))
+
+(defun ogent-gastown-cycle-sections ()
+  "Cycle visibility of all sections."
+  (interactive)
+  (if ogent-gastown--magit-section-available
+      (magit-section-cycle-global)
+    (message "Section cycling requires magit-section")))
+
+(defun ogent-gastown-visit ()
+  "Visit the item at point."
+  (interactive)
+  (when ogent-gastown--magit-section-available
+    (let ((section (magit-current-section)))
+      (cond
+       ((eq (eieio-object-class-name section) 'ogent-gastown-mail-item-section)
+        (let* ((msg (oref section value))
+               (id (plist-get msg :id)))
+          (ogent-gastown-mail-read id)))
+       (t
+        (magit-section-toggle section))))))
+
+;;; Actions
+
+(defun ogent-gastown-mail-read (&optional id)
+  "Read mail message ID."
+  (interactive)
+  (let ((mail-id (or id
+                     (when ogent-gastown--magit-section-available
+                       (let ((section (magit-current-section)))
+                         (when (eq (eieio-object-class-name section)
+                                   'ogent-gastown-mail-item-section)
+                           (plist-get (oref section value) :id))))
+                     (completing-read "Mail ID: "
+                                      (mapcar (lambda (m) (plist-get m :id))
+                                              ogent-gastown--mail-data)))))
+    (when mail-id
+      (let ((cmd (format "%s mail read %s" ogent-gastown-gt-executable mail-id)))
+        (async-shell-command cmd "*gt mail*")))))
+
+(defun ogent-gastown-mail-compose ()
+  "Compose a new mail message."
+  (interactive)
+  (let* ((to (read-string "To: "))
+         (subject (read-string "Subject: "))
+         (body (read-string "Message: ")))
+    (when (and to (not (string-empty-p to)))
+      (ogent-gastown--run-async
+       (list "mail" "send" to "-s" subject "-m" body)
+       (lambda (_result)
+         (message "Mail sent to %s" to)
+         (ogent-gastown-cache-invalidate)
+         (ogent-gastown-refresh))
+       (lambda (err)
+         (message "Failed to send mail: %s" err))
+       t))))
+
+(defun ogent-gastown-hook-show ()
+  "Show hook details."
+  (interactive)
+  (async-shell-command (format "%s hook" ogent-gastown-gt-executable) "*gt hook*"))
+
+(defun ogent-gastown-hook-attach ()
+  "Attach work to hook."
+  (interactive)
+  (let ((bead-id (read-string "Bead ID to hook: ")))
+    (ogent-gastown--run-async
+     (list "hook" bead-id)
+     (lambda (_result)
+       (message "Hooked: %s" bead-id)
+       (ogent-gastown-cache-invalidate)
+       (ogent-gastown-refresh))
+     (lambda (err)
+       (message "Failed to hook: %s" err))
+     t)))
+
+(defun ogent-gastown-convoy-status ()
+  "Show convoy status."
+  (interactive)
+  (let ((convoy-id (when ogent-gastown--magit-section-available
+                     (let ((section (magit-current-section)))
+                       (when (eq (eieio-object-class-name section)
+                                 'ogent-gastown-convoy-item-section)
+                         (plist-get (oref section value) :id))))))
+    (if convoy-id
+        (async-shell-command
+         (format "%s convoy status %s" ogent-gastown-gt-executable convoy-id)
+         "*gt convoy*")
+      (async-shell-command
+       (format "%s convoy list" ogent-gastown-gt-executable)
+       "*gt convoy*"))))
+
+(defun ogent-gastown-convoy-create ()
+  "Create a new convoy."
+  (interactive)
+  (let* ((name (read-string "Convoy name: "))
+         (issues (read-string "Issue IDs (space-separated): ")))
+    (ogent-gastown--run-async
+     (append (list "convoy" "create" name) (split-string issues))
+     (lambda (_result)
+       (message "Created convoy: %s" name)
+       (ogent-gastown-cache-invalidate)
+       (ogent-gastown-refresh))
+     (lambda (err)
+       (message "Failed to create convoy: %s" err))
+     t)))
+
+(defun ogent-gastown-stats-show ()
+  "Show detailed town statistics."
+  (interactive)
+  (async-shell-command
+   (format "%s status" ogent-gastown-gt-executable)
+   "*gt status*"))
+
+(defun ogent-gastown-deacon-show ()
+  "Show deacon status and controls."
+  (interactive)
+  (async-shell-command
+   (format "%s deacon status" ogent-gastown-gt-executable)
+   "*gt deacon*"))
+
+(defun ogent-gastown-witness-show ()
+  "Show witness status."
+  (interactive)
+  (let ((rig (when ogent-gastown--magit-section-available
+               (let ((section (magit-current-section)))
+                 (when (eq (eieio-object-class-name section)
+                           'ogent-gastown-witness-item-section)
+                   (plist-get (oref section value) :rig))))))
+    (if rig
+        (async-shell-command
+         (format "%s witness status %s" ogent-gastown-gt-executable rig)
+         "*gt witness*")
+      (let ((rig-name (completing-read
+                       "Rig: "
+                       (mapcar (lambda (w) (plist-get w :rig))
+                               ogent-gastown--witness-data))))
+        (async-shell-command
+         (format "%s witness status %s" ogent-gastown-gt-executable rig-name)
+         "*gt witness*")))))
+
+(defun ogent-gastown-crew-status ()
+  "Show crew member status."
+  (interactive)
+  (let ((crew-name (when ogent-gastown--magit-section-available
+                     (let ((section (magit-current-section)))
+                       (when (eq (eieio-object-class-name section)
+                                 'ogent-gastown-crew-item-section)
+                         (plist-get (oref section value) :name))))))
+    (if crew-name
+        (async-shell-command
+         (format "%s crew status %s" ogent-gastown-gt-executable crew-name)
+         "*gt crew*")
+      (async-shell-command
+       (format "%s crew list" ogent-gastown-gt-executable)
+       "*gt crew*"))))
+
+(defun ogent-gastown-polecat-status ()
+  "Show polecat status."
+  (interactive)
+  (let ((polecat-name (when ogent-gastown--magit-section-available
+                        (let ((section (magit-current-section)))
+                          (when (eq (eieio-object-class-name section)
+                                    'ogent-gastown-polecat-item-section)
+                            (plist-get (oref section value) :name))))))
+    (if polecat-name
+        (async-shell-command
+         (format "%s polecat status %s" ogent-gastown-gt-executable polecat-name)
+         "*gt polecat*")
+      (async-shell-command
+       (format "%s polecat list" ogent-gastown-gt-executable)
+       "*gt polecat*"))))
+
+(defun ogent-gastown-rig-status ()
+  "Show rig status."
+  (interactive)
+  (let ((rig-name (when ogent-gastown--magit-section-available
+                    (let ((section (magit-current-section)))
+                      (when (eq (eieio-object-class-name section)
+                                'ogent-gastown-rig-item-section)
+                        (plist-get (oref section value) :name))))))
+    (unless rig-name
+      (setq rig-name (completing-read
+                      "Rig: "
+                      (mapcar (lambda (r) (plist-get r :name))
+                              ogent-gastown--rigs-data))))
+    (when rig-name
+      (async-shell-command
+       (format "%s rig status %s" ogent-gastown-gt-executable rig-name)
+       "*gt rig*"))))
+
+(defun ogent-gastown-refinery-status ()
+  "Show refinery/merge-queue status."
+  (interactive)
+  (let ((rig-name (when ogent-gastown--magit-section-available
+                    (let ((section (magit-current-section)))
+                      (when (eq (eieio-object-class-name section)
+                                'ogent-gastown-rig-item-section)
+                        (plist-get (oref section value) :name))))))
+    (unless rig-name
+      (setq rig-name (completing-read
+                      "Rig: "
+                      (mapcar (lambda (r) (plist-get r :name))
+                              ogent-gastown--rigs-data))))
+    (when rig-name
+      (async-shell-command
+       (format "%s refinery status %s" ogent-gastown-gt-executable rig-name)
+       "*gt refinery*"))))
+
+;;; Refresh
+
+(defun ogent-gastown-refresh (&optional _ignore-auto _noconfirm)
+  "Refresh the Gas Town status buffer."
+  (interactive)
+  ;; Save position for restoration
+  (setq ogent-gastown--last-position (point))
+  (let ((buf (current-buffer)))
+    (ogent-gastown--start-loading)
+    (ogent-gastown--fetch-all
+     (lambda ()
+       (when (buffer-live-p buf)
+         (with-current-buffer buf
+           (ogent-gastown--stop-loading)
+           (let ((inhibit-read-only t)
+                 (pos ogent-gastown--last-position))
+             (erase-buffer)
+             (ogent-gastown--insert-buffer-contents)
+             ;; Restore position
+             (goto-char (min (or pos (point-min)) (point-max))))))))))
+
+(defun ogent-gastown-refresh-force ()
+  "Force refresh, clearing cache."
+  (interactive)
+  (ogent-gastown-cache-invalidate)
+  (ogent-gastown-refresh))
+
+;;; Entry Point
+
+;;;###autoload
+(defun ogent-gastown-status (&optional rig)
+  "Open the Gas Town status buffer.
+Like `magit-status', this shows a comprehensive view of your
+Gas Town multi-agent workspace including hook status, mail,
+convoys, crew members, and polecats.
+
+With optional RIG argument, show status for that specific rig."
+  (interactive)
+  (unless (ogent-gastown--in-town-p)
+    (user-error "Gas Town CLI (gt) not found in PATH"))
+  (let* ((current-rig (or rig (ogent-gastown--current-rig)))
+         (buf-name (ogent-gastown--buffer-name current-rig))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      (unless (eq major-mode 'ogent-gastown-status-mode)
+        (ogent-gastown-status-mode))
+      (setq ogent-gastown--town-root (ogent-gastown--find-town-root))
+      (setq ogent-gastown--current-rig current-rig)
+      (ogent-gastown-refresh))
+    ;; Display based on customization
+    (pcase ogent-gastown-display-buffer-action
+      ('same-window (switch-to-buffer buf))
+      ('other-window (switch-to-buffer-other-window buf))
+      (_ (switch-to-buffer buf)))))
+
+;;; Cleanup
+
+(defun ogent-gastown--cleanup-on-kill ()
+  "Clean up timers when the buffer is killed."
+  (ogent-gastown--stop-loading-timer))
+
+(add-hook 'ogent-gastown-status-mode-hook
+          (lambda ()
+            (add-hook 'kill-buffer-hook #'ogent-gastown--cleanup-on-kill nil t)))
+
+;;; Evil Integration
+
+(declare-function evil-set-initial-state "ext:evil-core")
+(declare-function evil-make-overriding-map "ext:evil-core")
+(declare-function evil-normalize-keymaps "ext:evil-core")
+(declare-function evil-local-set-key "ext:evil-core")
+
+(defun ogent-gastown--setup-evil ()
+  "Set up evil keybindings for `ogent-gastown-status-mode'.
+Called after evil is loaded."
+  (when (fboundp 'evil-set-initial-state)
+    (evil-set-initial-state 'ogent-gastown-status-mode 'normal)
+    (evil-make-overriding-map ogent-gastown-status-mode-map 'normal)
+    (add-hook 'ogent-gastown-status-mode-hook
+              (lambda ()
+                (evil-local-set-key 'normal "gg" #'evil-goto-first-line)
+                (evil-local-set-key 'normal "G" #'evil-goto-line)
+                (evil-local-set-key 'normal "gr" #'ogent-gastown-refresh)
+                (evil-local-set-key 'normal "gR" #'ogent-gastown-refresh-force)
+                (evil-local-set-key 'normal "gj" #'ogent-gastown-next-section)
+                (evil-local-set-key 'normal "gk" #'ogent-gastown-prev-section)
+                (evil-local-set-key 'normal (kbd "TAB") #'ogent-gastown-toggle-section)
+                (evil-local-set-key 'normal (kbd "<tab>") #'ogent-gastown-toggle-section)
+                (evil-local-set-key 'normal "ZZ" #'quit-window)
+                (evil-local-set-key 'normal "ZQ" #'quit-window)))
+    (add-hook 'ogent-gastown-status-mode-hook #'evil-normalize-keymaps)))
+
+(with-eval-after-load 'evil
+  (ogent-gastown--setup-evil))
+
+(provide 'ogent-gastown-status)
+
+;;; ogent-gastown-status.el ends here
