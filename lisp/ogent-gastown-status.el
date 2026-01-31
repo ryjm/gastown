@@ -102,6 +102,27 @@ Valid values: `workers', `rigs', `closed-convoys'."
   :type '(repeat symbol)
   :group 'ogent-gastown)
 
+(defcustom ogent-gastown-auto-refresh nil
+  "When non-nil, automatically refresh buffer at specified interval.
+Set to a number of seconds, or nil to disable."
+  :type '(choice (const :tag "Disabled" nil)
+                 (integer :tag "Seconds"))
+  :group 'ogent-gastown)
+
+(defcustom ogent-gastown-mail-detail-display-action 'below
+  "How to display the mail detail buffer.
+Options:
+  `below' - Vertical split below status buffer (like `magit-show-commit')
+  `other-window' - Display in another window"
+  :type '(choice (const :tag "Below (magit-style)" below)
+                 (const :tag "Other window" other-window))
+  :group 'ogent-gastown)
+
+(defcustom ogent-gastown-mail-detail-auto-refresh t
+  "Whether to automatically refresh mail details in background."
+  :type 'boolean
+  :group 'ogent-gastown)
+
 ;;; Faces
 
 (defgroup ogent-gastown-faces nil
@@ -334,6 +355,15 @@ Valid values: `workers', `rigs', `closed-convoys'."
 
 (defvar-local ogent-gastown--last-position nil
   "Last cursor position for restoration after refresh.")
+
+(defvar-local ogent-gastown--last-section-type nil
+  "Last section type for smarter position restoration.")
+
+(defvar-local ogent-gastown--last-section-value nil
+  "Last section value for smarter position restoration.")
+
+(defvar-local ogent-gastown--auto-refresh-timer nil
+  "Timer for auto-refresh feature.")
 
 ;;; Cache
 
@@ -657,6 +687,10 @@ Other:
        (setq-local truncate-lines t)
        (setq-local buffer-read-only t)
        (setq header-line-format '(:eval (ogent-gastown--header-line)))
+       ;; Imenu support
+       (setq-local imenu-create-index-function #'ogent-gastown--imenu-create-index)
+       ;; Auto-refresh
+       (ogent-gastown--start-auto-refresh)
        (when (bound-and-true-p ogent-gastown--magit-section-available)
          (setq-local magit-section-visibility-indicator
                      (if ogent-gastown-use-unicode '("..." . t) '("..." . t)))))))
@@ -665,6 +699,37 @@ Other:
 
 ;; Backward compatibility alias
 (defalias 'ogent-gastown-mode 'ogent-gastown-status-mode)
+
+;;; Imenu Support
+
+(defvar ogent-gastown--imenu-generic-expression
+  '(("Stats" "^📊\\|^# Town Stats" 0)
+    ("Deacon" "^👁\\|^D Deacon" 0)
+    ("Witnesses" "^🔭\\|^W Witnesses" 0)
+    ("Hook" "^⚓\\|^# Hook" 0)
+    ("Mail" "^📬\\|^@ Mail" 0)
+    ("Convoys" "^🚛\\|^> Convoys" 0)
+    ("Rigs" "^🏭\\|^R Rigs" 0)
+    ("Crew" "^👤\\|^C Crew" 0)
+    ("Polecats" "^🔧\\|^P Polecats" 0)
+    ("Workers" "^🔩\\|^\\* Workers" 0))
+  "Imenu patterns for Gas Town status buffer.")
+
+(defun ogent-gastown--imenu-create-index ()
+  "Create imenu index for Gas Town status buffer."
+  (let ((index nil))
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "^\\(📊\\|👁\\|🔭\\|⚓\\|📬\\|🚛\\|🏭\\|👤\\|🔧\\|🔩\\|#\\|D\\|W\\|@\\|>\\|R\\|C\\|P\\|\\*\\) " nil t)
+        (let* ((start (match-beginning 0))
+               (line (buffer-substring-no-properties
+                      start (line-end-position)))
+               (name (replace-regexp-in-string
+                      "^\\(📊\\|👁\\|🔭\\|⚓\\|📬\\|🚛\\|🏭\\|👤\\|🔧\\|🔩\\|#\\|D\\|W\\|@\\|>\\|R\\|C\\|P\\|\\*\\) +"
+                      ""
+                      (car (split-string line " (" t)))))
+          (push (cons name start) index))))
+    (nreverse index)))
 
 ;;; Loading Animation
 
@@ -1626,30 +1691,79 @@ rig-specific name like `*Gas Town: <rig>*'."
   (when ogent-gastown--magit-section-available
     (let ((section (magit-current-section)))
       (cond
+       ;; Mail item - show detail view
        ((eq (eieio-object-class-name section) 'ogent-gastown-mail-item-section)
-        (let* ((msg (oref section value))
-               (id (plist-get msg :id)))
-          (ogent-gastown-mail-read id)))
+        (ogent-gastown--show-mail-detail (oref section value)))
+
+       ;; Rig item - show rig status
+       ((eq (eieio-object-class-name section) 'ogent-gastown-rig-item-section)
+        (let ((rig-name (plist-get (oref section value) :name)))
+          (when rig-name
+            (async-shell-command
+             (format "%s rig status %s" ogent-gastown-gt-executable rig-name)
+             "*gt rig*"))))
+
+       ;; Crew item - show crew status
+       ((eq (eieio-object-class-name section) 'ogent-gastown-crew-item-section)
+        (let ((crew-name (plist-get (oref section value) :name)))
+          (when crew-name
+            (async-shell-command
+             (format "%s crew status %s" ogent-gastown-gt-executable crew-name)
+             "*gt crew*"))))
+
+       ;; Polecat item - show polecat status
+       ((eq (eieio-object-class-name section) 'ogent-gastown-polecat-item-section)
+        (let ((polecat-name (plist-get (oref section value) :name)))
+          (when polecat-name
+            (async-shell-command
+             (format "%s polecat status %s" ogent-gastown-gt-executable polecat-name)
+             "*gt polecat*"))))
+
+       ;; Convoy item - show convoy status
+       ((eq (eieio-object-class-name section) 'ogent-gastown-convoy-item-section)
+        (let ((convoy-id (plist-get (oref section value) :id)))
+          (when convoy-id
+            (async-shell-command
+             (format "%s convoy status %s" ogent-gastown-gt-executable convoy-id)
+             "*gt convoy*"))))
+
+       ;; Default - toggle section
        (t
         (magit-section-toggle section))))))
 
 ;;; Actions
 
 (defun ogent-gastown-mail-read (&optional id)
-  "Read mail message ID."
+  "Read mail message ID.
+If ID is provided, fetch and display that message.
+Otherwise, use the mail at point or prompt for ID."
   (interactive)
-  (let ((mail-id (or id
-                     (when ogent-gastown--magit-section-available
-                       (let ((section (magit-current-section)))
-                         (when (eq (eieio-object-class-name section)
-                                   'ogent-gastown-mail-item-section)
-                           (plist-get (oref section value) :id))))
-                     (completing-read "Mail ID: "
-                                      (mapcar (lambda (m) (plist-get m :id))
-                                              ogent-gastown--mail-data)))))
+  (let* ((msg-at-point (when ogent-gastown--magit-section-available
+                         (let ((section (magit-current-section)))
+                           (when (eq (eieio-object-class-name section)
+                                     'ogent-gastown-mail-item-section)
+                             (oref section value)))))
+         (mail-id (or id
+                      (plist-get msg-at-point :id)
+                      (completing-read "Mail ID: "
+                                       (mapcar (lambda (m) (plist-get m :id))
+                                               ogent-gastown--mail-data)))))
     (when mail-id
-      (let ((cmd (format "%s mail read %s" ogent-gastown-gt-executable mail-id)))
-        (async-shell-command cmd "*gt mail*")))))
+      ;; If we have the full message already, show it directly
+      (if msg-at-point
+          (ogent-gastown--show-mail-detail msg-at-point)
+        ;; Otherwise, find it in the cached data or fetch it
+        (let ((cached-msg (seq-find (lambda (m) (equal (plist-get m :id) mail-id))
+                                    ogent-gastown--mail-data)))
+          (if cached-msg
+              (ogent-gastown--show-mail-detail cached-msg)
+            ;; Fetch the message
+            (ogent-gastown--run-async
+             (list "mail" "show" mail-id "--json")
+             (lambda (result)
+               (ogent-gastown--show-mail-detail result))
+             (lambda (err)
+               (message "Failed to fetch mail: %s" err)))))))))
 
 (defun ogent-gastown-mail-compose ()
   "Compose a new mail message."
@@ -1826,7 +1940,7 @@ rig-specific name like `*Gas Town: <rig>*'."
   "Refresh the Gas Town status buffer."
   (interactive)
   ;; Save position for restoration
-  (setq ogent-gastown--last-position (point))
+  (ogent-gastown--save-position)
   (let ((buf (current-buffer)))
     (ogent-gastown--start-loading)
     (ogent-gastown--fetch-all
@@ -1834,12 +1948,11 @@ rig-specific name like `*Gas Town: <rig>*'."
        (when (buffer-live-p buf)
          (with-current-buffer buf
            (ogent-gastown--stop-loading)
-           (let ((inhibit-read-only t)
-                 (pos ogent-gastown--last-position))
+           (let ((inhibit-read-only t))
              (erase-buffer)
              (ogent-gastown--insert-buffer-contents)
              ;; Restore position
-             (goto-char (min (or pos (point-min)) (point-max))))))))))
+             (ogent-gastown--restore-position))))))))
 
 (defun ogent-gastown-refresh-force ()
   "Force refresh, clearing cache."
@@ -1879,7 +1992,8 @@ With optional RIG argument, show status for that specific rig."
 
 (defun ogent-gastown--cleanup-on-kill ()
   "Clean up timers when the buffer is killed."
-  (ogent-gastown--stop-loading-timer))
+  (ogent-gastown--stop-loading-timer)
+  (ogent-gastown--stop-auto-refresh))
 
 (add-hook 'ogent-gastown-status-mode-hook
           (lambda ()
@@ -1896,6 +2010,7 @@ With optional RIG argument, show status for that specific rig."
   "Set up evil keybindings for `ogent-gastown-status-mode'.
 Called after evil is loaded."
   (when (fboundp 'evil-set-initial-state)
+    ;; Status mode
     (evil-set-initial-state 'ogent-gastown-status-mode 'normal)
     (evil-make-overriding-map ogent-gastown-status-mode-map 'normal)
     (add-hook 'ogent-gastown-status-mode-hook
@@ -1910,10 +2025,347 @@ Called after evil is loaded."
                 (evil-local-set-key 'normal (kbd "<tab>") #'ogent-gastown-toggle-section)
                 (evil-local-set-key 'normal "ZZ" #'quit-window)
                 (evil-local-set-key 'normal "ZQ" #'quit-window)))
-    (add-hook 'ogent-gastown-status-mode-hook #'evil-normalize-keymaps)))
+    (add-hook 'ogent-gastown-status-mode-hook #'evil-normalize-keymaps)
+
+    ;; Mail detail mode
+    (evil-set-initial-state 'ogent-gastown-mail-detail-mode 'normal)
+    (evil-make-overriding-map ogent-gastown-mail-detail-mode-map 'normal)
+    (add-hook 'ogent-gastown-mail-detail-mode-hook
+              (lambda ()
+                (evil-local-set-key 'normal "gg" #'evil-goto-first-line)
+                (evil-local-set-key 'normal "G" #'evil-goto-line)
+                (evil-local-set-key 'normal "gr" #'ogent-gastown-mail-detail-refresh)
+                (evil-local-set-key 'normal "j" #'evil-next-line)
+                (evil-local-set-key 'normal "k" #'evil-previous-line)
+                (evil-local-set-key 'normal "ZZ" #'quit-window)
+                (evil-local-set-key 'normal "ZQ" #'quit-window)))
+    (add-hook 'ogent-gastown-mail-detail-mode-hook #'evil-normalize-keymaps)))
 
 (with-eval-after-load 'evil
   (ogent-gastown--setup-evil))
+
+;;; Mail Detail Mode
+
+(defvar ogent-gastown-mail-detail-buffer-name "*Gas Town Mail*"
+  "Base name of the mail detail buffer.")
+
+(defun ogent-gastown--mail-detail-buffer-name ()
+  "Return the mail detail buffer name for the current project."
+  (if (and ogent-gastown-per-project-buffers ogent-gastown--current-rig)
+      (format "*Gas Town Mail: %s*" ogent-gastown--current-rig)
+    ogent-gastown-mail-detail-buffer-name))
+
+(defvar ogent-gastown-mail-detail-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "g" #'ogent-gastown-mail-detail-refresh)
+    (define-key map "q" #'quit-window)
+    (define-key map "r" #'ogent-gastown-mail-reply)
+    (define-key map "d" #'ogent-gastown-mail-delete)
+    (define-key map "m" #'ogent-gastown-mail-mark-read)
+    (define-key map "n" #'ogent-gastown-mail-detail-next)
+    (define-key map "p" #'ogent-gastown-mail-detail-prev)
+    (define-key map "?" #'ogent-gastown-mail-detail-help)
+    map)
+  "Keymap for `ogent-gastown-mail-detail-mode'.")
+
+(define-derived-mode ogent-gastown-mail-detail-mode special-mode "GT-Mail"
+  "Major mode for viewing mail message details."
+  :group 'ogent-gastown
+  (setq-local revert-buffer-function #'ogent-gastown-mail-detail-refresh)
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t))
+
+(defvar-local ogent-gastown-mail-detail--message nil
+  "The mail message being displayed in this detail buffer.")
+
+(defvar-local ogent-gastown-mail-detail--project-root nil
+  "Project root for this mail detail buffer.")
+
+(defun ogent-gastown--show-mail-detail (msg)
+  "Show detailed view for mail MSG in a dedicated buffer."
+  (let* ((project-root ogent-gastown--town-root)
+         (rig ogent-gastown--current-rig)
+         (detail-buf-name (ogent-gastown--mail-detail-buffer-name))
+         (id (plist-get msg :id)))
+
+    ;; Render with cached data first
+    (ogent-gastown--render-mail-detail msg project-root rig detail-buf-name)
+
+    ;; If auto-refresh enabled, fetch fresh data in background
+    (when ogent-gastown-mail-detail-auto-refresh
+      (ogent-gastown--run-async
+       (list "mail" "show" id "--json")
+       (lambda (fresh-msg)
+         (let ((buf (get-buffer detail-buf-name)))
+           (when (and (buffer-live-p buf)
+                      fresh-msg
+                      (with-current-buffer buf
+                        (equal (plist-get ogent-gastown-mail-detail--message :id)
+                               (plist-get fresh-msg :id))))
+             (ogent-gastown--render-mail-detail fresh-msg project-root rig detail-buf-name))))
+       (lambda (_err) nil)))))
+
+(defun ogent-gastown--render-mail-detail (msg &optional project-root rig buffer-name)
+  "Render MSG in the mail detail buffer.
+PROJECT-ROOT and RIG are used for context.
+BUFFER-NAME is the detail buffer name."
+  (let* ((buf-name (or buffer-name (ogent-gastown--mail-detail-buffer-name)))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (ogent-gastown-mail-detail-mode)
+        (setq ogent-gastown-mail-detail--project-root project-root)
+        (setq ogent-gastown-mail-detail--message msg)
+        (setq ogent-gastown--current-rig rig)
+        (ogent-gastown--insert-mail-detail-header msg)
+        (ogent-gastown--insert-mail-detail-body msg)
+        (ogent-gastown--insert-mail-detail-attachments msg)
+        (goto-char (point-min))))
+
+    ;; Display the buffer
+    (pcase ogent-gastown-mail-detail-display-action
+      ('below
+       (let ((window (or (get-buffer-window buf)
+                         (display-buffer buf
+                                         '(display-buffer-below-selected
+                                           . ((window-height . 0.4)))))))
+         (select-window window)))
+      ('other-window
+       (switch-to-buffer-other-window buf))
+      (_ (switch-to-buffer-other-window buf)))))
+
+(defun ogent-gastown--insert-mail-detail-header (msg)
+  "Insert mail header for MSG."
+  (let* ((id (plist-get msg :id))
+         (from (plist-get msg :from))
+         (to (plist-get msg :to))
+         (subject (plist-get msg :subject))
+         (timestamp (plist-get msg :timestamp))
+         (read (plist-get msg :read))
+         (importance (plist-get msg :importance)))
+
+    ;; Subject line
+    (insert (propertize (or subject "(no subject)")
+                        'face '(:weight bold :height 1.2)))
+    (insert "\n")
+
+    ;; Meta line
+    (insert (propertize "From: " 'face 'ogent-gastown-dimmed))
+    (insert (propertize (or from "unknown") 'face 'ogent-gastown-mail-from))
+    (insert "\n")
+
+    (when to
+      (insert (propertize "To: " 'face 'ogent-gastown-dimmed))
+      (insert (if (listp to) (string-join to ", ") to))
+      (insert "\n"))
+
+    (insert (propertize "Date: " 'face 'ogent-gastown-dimmed))
+    (insert (or timestamp "unknown"))
+    (insert "\n")
+
+    (insert (propertize "ID: " 'face 'ogent-gastown-dimmed))
+    (insert (propertize (or id "???") 'face 'ogent-gastown-dimmed))
+
+    (when importance
+      (insert "  ")
+      (insert (propertize (format "[%s]" importance)
+                          'face (if (member importance '("high" "urgent"))
+                                    'ogent-gastown-mail-unread
+                                  'ogent-gastown-dimmed))))
+
+    (unless read
+      (insert "  ")
+      (insert (propertize "[UNREAD]" 'face 'ogent-gastown-mail-unread)))
+
+    (insert "\n")
+    (insert (propertize (make-string 60 ?─) 'face 'ogent-gastown-dimmed))
+    (insert "\n\n")))
+
+(defun ogent-gastown--insert-mail-detail-body (msg)
+  "Insert mail body for MSG."
+  (let ((body (plist-get msg :body)))
+    (if body
+        (progn
+          (insert body)
+          (insert "\n"))
+      (insert (propertize "(no message body)\n" 'face 'ogent-gastown-dimmed)))))
+
+(defun ogent-gastown--insert-mail-detail-attachments (msg)
+  "Insert attachments section for MSG."
+  (let ((attachments (plist-get msg :attachments)))
+    (when attachments
+      (insert "\n")
+      (insert (propertize (make-string 60 ?─) 'face 'ogent-gastown-dimmed))
+      (insert "\n")
+      (insert (propertize "Attachments:\n" 'face 'ogent-gastown-section-heading))
+      (dolist (att attachments)
+        (insert "  • ")
+        (insert (or (plist-get att :name) (plist-get att :path) "attachment"))
+        (when-let ((size (plist-get att :size)))
+          (insert (propertize (format " (%s)" size) 'face 'ogent-gastown-dimmed)))
+        (insert "\n")))))
+
+(defun ogent-gastown-mail-detail-refresh (&optional _ignore-auto _noconfirm)
+  "Refresh the current mail detail view."
+  (interactive)
+  (when ogent-gastown-mail-detail--message
+    (ogent-gastown--show-mail-detail ogent-gastown-mail-detail--message)))
+
+(defun ogent-gastown-mail-reply ()
+  "Reply to the current mail message."
+  (interactive)
+  (when-let ((msg ogent-gastown-mail-detail--message))
+    (let* ((from (plist-get msg :from))
+           (subject (plist-get msg :subject))
+           (reply-subject (if (string-prefix-p "Re:" (or subject ""))
+                              subject
+                            (format "Re: %s" (or subject ""))))
+           (body (read-string "Reply: ")))
+      (ogent-gastown--run-async
+       (list "mail" "send" from "-s" reply-subject "-m" body)
+       (lambda (_result)
+         (message "Reply sent to %s" from))
+       (lambda (err)
+         (message "Failed to send reply: %s" err))
+       t))))
+
+(defun ogent-gastown-mail-delete ()
+  "Delete the current mail message."
+  (interactive)
+  (when-let ((msg ogent-gastown-mail-detail--message))
+    (let ((id (plist-get msg :id)))
+      (when (yes-or-no-p (format "Delete mail %s? " id))
+        (ogent-gastown--run-async
+         (list "mail" "delete" id)
+         (lambda (_result)
+           (message "Mail %s deleted" id)
+           (quit-window t))
+         (lambda (err)
+           (message "Failed to delete mail: %s" err))
+         t)))))
+
+(defun ogent-gastown-mail-mark-read ()
+  "Mark the current mail message as read."
+  (interactive)
+  (when-let ((msg ogent-gastown-mail-detail--message))
+    (let ((id (plist-get msg :id)))
+      (ogent-gastown--run-async
+       (list "mail" "mark-read" id)
+       (lambda (_result)
+         (message "Mail %s marked as read" id)
+         (plist-put msg :read t)
+         (ogent-gastown-mail-detail-refresh))
+       (lambda (err)
+         (message "Failed to mark mail as read: %s" err))
+       t))))
+
+(defun ogent-gastown-mail-detail-next ()
+  "Show the next mail message in the inbox."
+  (interactive)
+  (when-let* ((current-id (plist-get ogent-gastown-mail-detail--message :id))
+              (status-buf (get-buffer (ogent-gastown--buffer-name ogent-gastown--current-rig))))
+    (with-current-buffer status-buf
+      (let* ((mail-list ogent-gastown--mail-data)
+             (idx (seq-position mail-list current-id
+                                (lambda (m id) (equal (plist-get m :id) id))))
+             (next-idx (when idx (1+ idx))))
+        (when (and next-idx (< next-idx (length mail-list)))
+          (ogent-gastown--show-mail-detail (nth next-idx mail-list)))))))
+
+(defun ogent-gastown-mail-detail-prev ()
+  "Show the previous mail message in the inbox."
+  (interactive)
+  (when-let* ((current-id (plist-get ogent-gastown-mail-detail--message :id))
+              (status-buf (get-buffer (ogent-gastown--buffer-name ogent-gastown--current-rig))))
+    (with-current-buffer status-buf
+      (let* ((mail-list ogent-gastown--mail-data)
+             (idx (seq-position mail-list current-id
+                                (lambda (m id) (equal (plist-get m :id) id))))
+             (prev-idx (when idx (1- idx))))
+        (when (and prev-idx (>= prev-idx 0))
+          (ogent-gastown--show-mail-detail (nth prev-idx mail-list)))))))
+
+(defun ogent-gastown-mail-detail-help ()
+  "Show help for mail detail view."
+  (interactive)
+  (message "g:refresh  r:reply  d:delete  m:mark-read  n:next  p:prev  q:quit"))
+
+;;; Auto-refresh
+
+(defun ogent-gastown--start-auto-refresh ()
+  "Start auto-refresh timer if configured."
+  (when (and ogent-gastown-auto-refresh
+             (numberp ogent-gastown-auto-refresh)
+             (> ogent-gastown-auto-refresh 0))
+    (ogent-gastown--stop-auto-refresh)
+    (setq ogent-gastown--auto-refresh-timer
+          (run-with-timer ogent-gastown-auto-refresh
+                          ogent-gastown-auto-refresh
+                          #'ogent-gastown--auto-refresh-callback
+                          (current-buffer)))))
+
+(defun ogent-gastown--stop-auto-refresh ()
+  "Stop auto-refresh timer."
+  (when ogent-gastown--auto-refresh-timer
+    (cancel-timer ogent-gastown--auto-refresh-timer)
+    (setq ogent-gastown--auto-refresh-timer nil)))
+
+(defun ogent-gastown--auto-refresh-callback (buffer)
+  "Auto-refresh callback for BUFFER."
+  (when (and (buffer-live-p buffer)
+             (get-buffer-window buffer))
+    (with-current-buffer buffer
+      (ogent-gastown-refresh))))
+
+;;; Better Position Restoration
+
+(defun ogent-gastown--save-position ()
+  "Save current position for restoration after refresh."
+  (setq ogent-gastown--last-position (point))
+  (when ogent-gastown--magit-section-available
+    (when-let ((section (magit-current-section)))
+      (setq ogent-gastown--last-section-type (eieio-object-class-name section))
+      (when (slot-boundp section 'value)
+        (setq ogent-gastown--last-section-value (oref section value))))))
+
+(defun ogent-gastown--restore-position ()
+  "Restore position after refresh, trying to return to same item."
+  (cond
+   ;; Try to find same section by value
+   ((and ogent-gastown--magit-section-available
+         ogent-gastown--last-section-value)
+    (let ((found nil))
+      (save-excursion
+        (goto-char (point-min))
+        (while (and (not found)
+                    (condition-case nil
+                        (progn (magit-section-forward) t)
+                      (error nil)))
+          (when-let ((section (magit-current-section)))
+            (when (and (eq (eieio-object-class-name section)
+                           ogent-gastown--last-section-type)
+                       (slot-boundp section 'value)
+                       (ogent-gastown--section-value-matches-p
+                        (oref section value)
+                        ogent-gastown--last-section-value))
+              (setq found (point))))))
+      (when found
+        (goto-char found))))
+
+   ;; Fall back to saved point position
+   (ogent-gastown--last-position
+    (goto-char (min ogent-gastown--last-position (point-max))))))
+
+(defun ogent-gastown--section-value-matches-p (val1 val2)
+  "Return non-nil if section values VAL1 and VAL2 match.
+Compares by :id or :name property if available."
+  (or (equal val1 val2)
+      (and (plistp val1) (plistp val2)
+           (or (and (plist-get val1 :id) (plist-get val2 :id)
+                    (equal (plist-get val1 :id) (plist-get val2 :id)))
+               (and (plist-get val1 :name) (plist-get val2 :name)
+                    (equal (plist-get val1 :name) (plist-get val2 :name)))))))
 
 (provide 'ogent-gastown-status)
 
