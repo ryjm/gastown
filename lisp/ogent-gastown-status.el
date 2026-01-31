@@ -1688,13 +1688,6 @@ rig-specific name like `*Gas Town: <rig>*'."
 
 ;;; Navigation
 
-(defun ogent-gastown--current-item ()
-  "Return the item at point (mail, convoy, crew, polecat, etc.)."
-  (when ogent-gastown--magit-section-available
-    (when-let ((section (magit-current-section)))
-      (when (slot-boundp section 'value)
-        (slot-value section 'value)))))
-
 (defun ogent-gastown-next-item ()
   "Move to the next item."
   (interactive)
