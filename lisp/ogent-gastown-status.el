@@ -2427,4 +2427,7 @@ Compares by :id or :name property if available."
 
 (provide 'ogent-gastown-status)
 
+;; Local Variables:
+;; byte-compile-warnings: (not unresolved)
+;; End:
 ;;; ogent-gastown-status.el ends here
