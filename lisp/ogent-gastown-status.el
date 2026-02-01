@@ -761,19 +761,6 @@ Other:
 
 ;;; Imenu Support
 
-(defvar ogent-gastown--imenu-generic-expression
-  '(("Stats" "^📊\\|^# Town Stats" 0)
-    ("Deacon" "^👁\\|^D Deacon" 0)
-    ("Witnesses" "^🔭\\|^W Witnesses" 0)
-    ("Hook" "^⚓\\|^# Hook" 0)
-    ("Mail" "^📬\\|^@ Mail" 0)
-    ("Convoys" "^🚛\\|^> Convoys" 0)
-    ("Rigs" "^🏭\\|^R Rigs" 0)
-    ("Crew" "^👤\\|^C Crew" 0)
-    ("Polecats" "^🔧\\|^P Polecats" 0)
-    ("Workers" "^🔩\\|^\\* Workers" 0))
-  "Imenu patterns for Gas Town status buffer.")
-
 (defun ogent-gastown--imenu-create-index ()
   "Create imenu index for Gas Town status buffer."
   (let ((index nil))
