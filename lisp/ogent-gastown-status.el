@@ -599,9 +599,6 @@ If NO-CACHE is non-nil, skip cache lookup and storage."
     (defclass ogent-gastown-workers-section (magit-section) ()
       "Section for workers overview.")
 
-    (defclass ogent-gastown-worker-section (magit-section) ()
-      "Section for a single worker.")
-
     (defclass ogent-gastown-stats-section (magit-section) ()
       "Section for town statistics.")
 
