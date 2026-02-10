@@ -127,7 +127,7 @@ func listAllBeadsMessages(workDir, beadsDir string) ([]BeadsMessage, error) {
 	}
 
 	args := []string{"list",
-		"--type", "message",
+		"--label", "gt:message",
 		"--json",
 		"--limit", "0",
 	}
