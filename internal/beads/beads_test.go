@@ -130,7 +130,7 @@ func TestWrapError(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		err := b.wrapError(nil, tt.stderr, []string{"test"})
+		err := b.wrapError(nil, tt.stderr, "", []string{"test"})
 		if tt.wantNil {
 			if err != nil {
 				t.Errorf("wrapError(%q) = %v, want nil", tt.stderr, err)
