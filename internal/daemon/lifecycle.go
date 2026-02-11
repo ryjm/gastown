@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -572,10 +571,9 @@ const syncFailureEscalationThreshold = 3
 // This ensures agents with persistent clones (like refinery) start with current code.
 // Handles dirty working trees by auto-stashing before pull and restoring after.
 func (d *Daemon) syncWorkspace(workDir string) {
-	// Determine default branch - auto-detect from remote, allow rig config override
+	// Determine default branch from rig config
 	// workDir is like <townRoot>/<rigName>/<role>/rig or <townRoot>/<rigName>/crew/<name>
-	g := git.NewGit(workDir)
-	defaultBranch := g.RemoteDefaultBranch() // auto-detect main vs master
+	defaultBranch := "main" // fallback
 	rel, err := filepath.Rel(d.config.TownRoot, workDir)
 	if err == nil {
 		parts := strings.Split(rel, string(filepath.Separator))
