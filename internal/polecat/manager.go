@@ -277,20 +277,25 @@ func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFi
 // running and failing hard would orphan it. Agent state is a monitoring
 // concern, not a correctness requirement.
 func (m *Manager) SetAgentStateWithRetry(name string, state string) error {
+	// Use fewer retries than doltMaxRetries since agent state is a monitoring
+	// concern, not a correctness requirement. Long retry loops here block
+	// session startup and can cause the tmux session to die before the
+	// sling completes.
+	const agentStateMaxRetries = 3
 	var lastErr error
-	for attempt := 1; attempt <= doltMaxRetries; attempt++ {
+	for attempt := 1; attempt <= agentStateMaxRetries; attempt++ {
 		err := m.SetAgentState(name, state)
 		if err == nil {
 			return nil
 		}
 		lastErr = err
-		if attempt < doltMaxRetries {
+		if attempt < agentStateMaxRetries {
 			backoff := doltBackoff(attempt)
 			fmt.Printf("Warning: SetAgentState attempt %d failed, retrying in %v: %v\n", attempt, backoff, err)
 			time.Sleep(backoff)
 		}
 	}
-	return fmt.Errorf("setting agent state after %d attempts: %w", doltMaxRetries, lastErr)
+	return fmt.Errorf("setting agent state after %d attempts: %w", agentStateMaxRetries, lastErr)
 }
 
 // assigneeID returns the beads assignee identifier for a polecat.
@@ -602,11 +607,13 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (*Polecat, error)
 
 	// Determine the start point for the new worktree
 	// Use origin/<default-branch> to ensure we start from the rig's configured branch
-	defaultBranch := "main"
+	// Auto-detect main vs master from remote, allow rig config override
+	defaultBranch := repoGit.RemoteDefaultBranch()
 	if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
-	startPoint := fmt.Sprintf("origin/%s", defaultBranch)
+	// Use fully-qualified ref to avoid ambiguity between local and remote branches
+	startPoint := fmt.Sprintf("refs/remotes/origin/%s", defaultBranch)
 
 	// Always create fresh branch - unique name guarantees no collision
 	// git worktree add -b polecat/<name>-<timestamp> <path> <startpoint>
@@ -1040,7 +1047,8 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
-	startPoint := fmt.Sprintf("origin/%s", defaultBranch)
+	// Use fully-qualified ref to avoid ambiguity between local and remote branches
+	startPoint := fmt.Sprintf("refs/remotes/origin/%s", defaultBranch)
 
 	// Create fresh worktree to a temporary path first, so we can roll back if it fails.
 	// This prevents destroying the old worktree before the new one is confirmed working.

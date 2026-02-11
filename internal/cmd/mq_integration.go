@@ -256,9 +256,11 @@ func runMqIntegrationCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("fetching from origin: %w", err)
 	}
 
-	// 2. Create branch from origin/main
-	fmt.Printf("Creating branch '%s' from main...\n", branchName)
-	if err := g.CreateBranchFrom(branchName, "origin/main"); err != nil {
+	// 2. Create branch from origin/<default-branch>
+	defaultBranch := g.RemoteDefaultBranch()
+	startRef := fmt.Sprintf("refs/remotes/origin/%s", defaultBranch)
+	fmt.Printf("Creating branch '%s' from %s...\n", branchName, defaultBranch)
+	if err := g.CreateBranchFrom(branchName, startRef); err != nil {
 		return fmt.Errorf("creating branch: %w", err)
 	}
 
