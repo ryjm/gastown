@@ -46,7 +46,12 @@ func ResolveBeadsDir(workDir string) string {
 	// of being inside workDir, not inside workDir/.beads)
 	// e.g., redirect contains "../../mayor/rig/.beads"
 	// from crew/max/, this resolves to mayor/rig/.beads
-	resolved := filepath.Join(workDir, redirectTarget)
+	var resolved string
+	if filepath.IsAbs(redirectTarget) {
+		resolved = redirectTarget
+	} else {
+		resolved = filepath.Join(workDir, redirectTarget)
+	}
 
 	// Clean the path to resolve .. components
 	resolved = filepath.Clean(resolved)
@@ -89,7 +94,12 @@ func resolveBeadsDirWithDepth(beadsDir string, maxDepth int) string {
 
 	// Resolve relative to parent of beadsDir (the workDir)
 	workDir := filepath.Dir(beadsDir)
-	resolved := filepath.Clean(filepath.Join(workDir, redirectTarget))
+	var resolved string
+	if filepath.IsAbs(redirectTarget) {
+		resolved = filepath.Clean(redirectTarget)
+	} else {
+		resolved = filepath.Clean(filepath.Join(workDir, redirectTarget))
+	}
 
 	// Detect circular redirect
 	if resolved == beadsDir {

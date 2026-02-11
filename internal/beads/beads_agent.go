@@ -284,9 +284,11 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 	if err := target.Update(id, updateOpts); err != nil {
 		return nil, fmt.Errorf("updating agent bead: %w", err)
 	}
-	// Fix type separately — UpdateOptions doesn't support type changes
+	// Fix type separately — UpdateOptions doesn't support type changes.
+	// Non-fatal: bd update --type=agent may fail on some bd versions
+	// even though the type is valid (bd validation bug).
 	if _, err := target.run("update", id, "--type=agent"); err != nil {
-		return nil, fmt.Errorf("fixing agent bead type: %w", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not fix agent bead type: %v\n", err)
 	}
 
 	// Note: role slot no longer set - role definitions are config-based

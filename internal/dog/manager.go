@@ -176,11 +176,13 @@ func (m *Manager) createRigWorktree(dogPath, dogName, rigName string) (string, e
 
 	// Determine the start point for the new worktree
 	// Use origin/<default-branch> to ensure we start from the rig's configured branch
-	defaultBranch := "main"
+	// Auto-detect main vs master from remote, allow rig config override
+	defaultBranch := repoGit.RemoteDefaultBranch()
 	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
-	startPoint := fmt.Sprintf("origin/%s", defaultBranch)
+	// Use fully-qualified ref to avoid ambiguity between local and remote branches
+	startPoint := fmt.Sprintf("refs/remotes/origin/%s", defaultBranch)
 
 	// Unique branch per dog-rig combination
 	branchName := fmt.Sprintf("dog/%s-%s-%d", dogName, rigName, time.Now().UnixMilli())
