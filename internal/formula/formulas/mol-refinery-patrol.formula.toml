@@ -71,9 +71,9 @@ unless you are explicitly told to skip to a step."""
 formula = "mol-refinery-patrol"
 version = 6
 
-[vars]
 [vars.wisp_type]
-description = "Type of wisp created for this molecule"
+description = "Type of wisp (default: patrol)"
+required = false
 default = "patrol"
 
 [vars.integration_branch_refinery_enabled]
