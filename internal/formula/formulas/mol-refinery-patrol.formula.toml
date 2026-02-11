@@ -35,9 +35,9 @@ complete cleanup (nuke the polecat worktree)."""
 formula = "mol-refinery-patrol"
 version = 4
 
-[vars]
 [vars.wisp_type]
-description = "Type of wisp created for this molecule"
+description = "Type of wisp (default: patrol)"
+required = false
 default = "patrol"
 
 [[steps]]
