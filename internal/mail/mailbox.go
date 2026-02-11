@@ -119,21 +119,13 @@ func (m *Mailbox) listBeads() ([]*Message, error) {
 	return messages, nil
 }
 
-// listFromDir queries messages from a beads directory.
-// Returns messages where identity is the assignee OR a CC recipient.
-// Includes both open and hooked messages (hooked = auto-assigned handoff mail).
-// Uses a single bd list call and filters client-side, replacing the previous
-// approach of N parallel queries (2-3 per identity variant).
-func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
-	identities := m.identityVariants()
-
+// listAllBeadsMessages returns all non-closed message issues from a beads directory.
+// Callers can apply identity/status filtering client-side.
+func listAllBeadsMessages(workDir, beadsDir string) ([]BeadsMessage, error) {
 	if err := beads.EnsureCustomTypes(beadsDir); err != nil {
 		return nil, fmt.Errorf("ensuring custom types: %w", err)
 	}
 
-	// Single bd query: fetch all non-closed messages of type "message",
-	// then filter client-side for assignee/CC match. Process-spawn overhead
-	// dominates query time, so 1 broad call beats N narrow calls.
 	args := []string{"list",
 		"--type", "message",
 		"--json",
@@ -142,7 +134,7 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 
 	ctx, cancel := bdReadCtx()
 	defer cancel()
-	stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+	stdout, err := runBdCommand(ctx, args, workDir, beadsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +144,22 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 		if len(stdout) == 0 || string(stdout) == "null" {
 			return nil, nil
 		}
+		return nil, err
+	}
+
+	return allMsgs, nil
+}
+
+// listFromDir queries messages from a beads directory.
+// Returns messages where identity is the assignee OR a CC recipient.
+// Includes both open and hooked messages (hooked = auto-assigned handoff mail).
+// Uses a single bd list call and filters client-side, replacing the previous
+// approach of N parallel queries (2-3 per identity variant).
+func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
+	identities := m.identityVariants()
+
+	allMsgs, err := listAllBeadsMessages(m.workDir, beadsDir)
+	if err != nil {
 		return nil, err
 	}
 
@@ -203,7 +211,6 @@ func (m *Mailbox) identityVariants() []string {
 
 	return variants
 }
-
 
 func (m *Mailbox) listLegacy() ([]*Message, error) {
 	file, err := os.Open(m.path)

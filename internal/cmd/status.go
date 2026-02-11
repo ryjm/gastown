@@ -15,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -30,6 +29,8 @@ var statusFast bool
 var statusWatch bool
 var statusInterval int
 var statusVerbose bool
+var statusMQ bool
+var statusFull bool
 
 var statusCmd = &cobra.Command{
 	Use:     "status",
@@ -40,17 +41,21 @@ var statusCmd = &cobra.Command{
 
 Shows town name, registered rigs, polecats, and witness status.
 
-Use --fast to skip mail lookups for faster execution.
+By default, status runs in fast mode for low-latency snapshots.
+Use --full to include mail and extended hook details.
+Use --mq to include merge queue status (adds extra queries).
 Use --watch to continuously refresh status at regular intervals.`,
 	RunE: runStatus,
 }
 
 func init() {
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output as JSON")
-	statusCmd.Flags().BoolVar(&statusFast, "fast", false, "Skip mail lookups for faster execution")
+	statusCmd.Flags().BoolVar(&statusFast, "fast", true, "Skip mail lookups for faster execution (default true)")
+	statusCmd.Flags().BoolVar(&statusFull, "full", false, "Show full status (mail + extended hook details)")
 	statusCmd.Flags().BoolVarP(&statusWatch, "watch", "w", false, "Watch mode: refresh status continuously")
 	statusCmd.Flags().IntVarP(&statusInterval, "interval", "n", 2, "Refresh interval in seconds")
 	statusCmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Show detailed multi-line output per agent")
+	statusCmd.Flags().BoolVar(&statusMQ, "mq", false, "Include merge queue summary (extra queries)")
 	rootCmd.AddCommand(statusCmd)
 }
 
@@ -142,6 +147,9 @@ type StatusSum struct {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
+	if statusFull {
+		statusFast = false
+	}
 	if statusWatch {
 		return runStatusWatch(cmd, args)
 	}
@@ -193,6 +201,56 @@ func runStatusWatch(cmd *cobra.Command, args []string) error {
 	}
 }
 
+func knownRuntimeProcessNames() map[string]struct{} {
+	nameSet := make(map[string]struct{})
+	for _, preset := range config.ListAgentPresets() {
+		for _, name := range config.GetProcessNames(preset) {
+			if name == "" {
+				continue
+			}
+			nameSet[name] = struct{}{}
+		}
+	}
+	for _, name := range config.GetProcessNames("") {
+		if name == "" {
+			continue
+		}
+		nameSet[name] = struct{}{}
+	}
+	return nameSet
+}
+
+func isStatusShellCommand(command string) bool {
+	for _, shell := range constants.SupportedShells {
+		if command == shell {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionLikelyAlive is an O(1) pane-command heuristic.
+// It is intentionally conservative for shells (reports not-running), and optimistic
+// for unknown non-shell commands to handle runtimes that set argv[0] to version strings.
+func sessionLikelyAlive(commands []string, runtimeNames map[string]struct{}) bool {
+	if len(commands) == 0 {
+		return false
+	}
+	for _, cmd := range commands {
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" {
+			continue
+		}
+		if _, ok := runtimeNames[cmd]; ok {
+			return true
+		}
+		if !isStatusShellCommand(cmd) {
+			return true
+		}
+	}
+	return false
+}
+
 func runStatusOnce(_ *cobra.Command, _ []string) error {
 	// Find town root
 	townRoot, err := workspace.FindFromCwdOrError()
@@ -223,30 +281,19 @@ func runStatusOnce(_ *cobra.Command, _ []string) error {
 	// Create tmux instance for runtime checks
 	t := tmux.NewTmux()
 
-	// Pre-fetch all tmux sessions and verify agent liveness for O(1) lookup.
-	// A Gas Town session is only considered "running" if the agent process is
-	// alive inside it, not merely if the tmux session exists. This prevents
-	// zombie sessions (tmux alive, agent dead) from showing as running.
-	// See: gt-bd6i3
+	// Pre-fetch all tmux sessions and infer runtime liveness using pane command
+	// snapshots. This avoids spawning multiple tmux/ps subprocesses per session.
 	allSessions := make(map[string]bool)
+	runtimeNames := knownRuntimeProcessNames()
+	paneCommandsBySession, _ := t.ListSessionPaneCommands()
 	if sessions, err := t.ListSessions(); err == nil {
-		var sessionMu sync.Mutex
-		var sessionWg sync.WaitGroup
 		for _, s := range sessions {
 			if strings.HasPrefix(s, "gt-") || strings.HasPrefix(s, "hq-") {
-				sessionWg.Add(1)
-				go func(name string) {
-					defer sessionWg.Done()
-					alive := t.IsAgentAlive(name)
-					sessionMu.Lock()
-					allSessions[name] = alive
-					sessionMu.Unlock()
-				}(s)
+				allSessions[s] = sessionLikelyAlive(paneCommandsBySession[s], runtimeNames)
 			} else {
 				allSessions[s] = true
 			}
 		}
-		sessionWg.Wait()
 	}
 
 	// Discover rigs
@@ -256,101 +303,69 @@ func runStatusOnce(_ *cobra.Command, _ []string) error {
 	}
 
 	// Pre-fetch agent beads across all rig-specific beads DBs.
-	// In --fast mode, parallelize these fetches for better performance.
+	// Skip this in fast mode, bd list calls are the dominant latency cost and
+	// full mode is the explicit path for bead-backed details.
 	allAgentBeads := make(map[string]*beads.Issue)
 	allHookBeads := make(map[string]*beads.Issue)
-	var beadsMu sync.Mutex // Protects allAgentBeads and allHookBeads
+	if !statusFast {
+		var beadsMu sync.Mutex // Protects allAgentBeads
 
-	// Helper to safely merge beads into the shared maps
-	mergeAgentBeads := func(beadsMap map[string]*beads.Issue) {
-		beadsMu.Lock()
-		for id, issue := range beadsMap {
-			allAgentBeads[id] = issue
-		}
-		beadsMu.Unlock()
-	}
-	mergeHookBeads := func(beadsMap map[string]*beads.Issue) {
-		beadsMu.Lock()
-		for id, issue := range beadsMap {
-			allHookBeads[id] = issue
-		}
-		beadsMu.Unlock()
-	}
-
-	var beadsWg sync.WaitGroup
-
-	// Fetch town-level agent beads (Mayor, Deacon) from town beads
-	townBeadsPath := beads.GetTownBeadsPath(townRoot)
-	beadsWg.Add(1)
-	go func() {
-		defer beadsWg.Done()
-		townBeadsClient := beads.New(townBeadsPath)
-		townAgentBeads, _ := townBeadsClient.ListAgentBeads()
-		mergeAgentBeads(townAgentBeads)
-
-		// Fetch hook beads from town beads
-		var townHookIDs []string
-		for _, issue := range townAgentBeads {
-			hookID := issue.HookBead
-			if hookID == "" {
-				fields := beads.ParseAgentFields(issue.Description)
-				if fields != nil {
-					hookID = fields.HookBead
-				}
+		// Helper to safely merge beads into the shared maps
+		mergeAgentBeads := func(beadsMap map[string]*beads.Issue) {
+			beadsMu.Lock()
+			for id, issue := range beadsMap {
+				allAgentBeads[id] = issue
 			}
-			if hookID != "" {
-				townHookIDs = append(townHookIDs, hookID)
-			}
+			beadsMu.Unlock()
 		}
-		if len(townHookIDs) > 0 {
-			townHookBeads, _ := townBeadsClient.ShowMultiple(townHookIDs)
-			mergeHookBeads(townHookBeads)
-		}
-	}()
 
-	// Fetch rig-level agent beads in parallel
-	for _, r := range rigs {
+		var beadsWg sync.WaitGroup
+
+		// Fetch town-level agent beads (Mayor, Deacon) from town beads
+		townBeadsPath := beads.GetTownBeadsPath(townRoot)
 		beadsWg.Add(1)
-		go func(r *rig.Rig) {
+		go func() {
 			defer beadsWg.Done()
-			rigBeadsPath := filepath.Join(r.Path, "mayor", "rig")
-			rigBeads := beads.New(rigBeadsPath)
-			rigAgentBeads, _ := rigBeads.ListAgentBeads()
-			if rigAgentBeads == nil {
-				return
-			}
-			mergeAgentBeads(rigAgentBeads)
+			townBeadsClient := beads.New(townBeadsPath)
+			townAgentBeads, _ := townBeadsClient.ListAgentBeads()
+			mergeAgentBeads(townAgentBeads)
+		}()
 
-			var hookIDs []string
-			for _, issue := range rigAgentBeads {
-				// Use the HookBead field from the database column; fall back for legacy beads.
-				hookID := issue.HookBead
-				if hookID == "" {
-					fields := beads.ParseAgentFields(issue.Description)
-					if fields != nil {
-						hookID = fields.HookBead
-					}
+		// Fetch rig-level agent beads in parallel
+		for _, r := range rigs {
+			beadsWg.Add(1)
+			go func(r *rig.Rig) {
+				defer beadsWg.Done()
+				rigBeadsPath := filepath.Join(r.Path, "mayor", "rig")
+				rigBeads := beads.New(rigBeadsPath)
+				rigAgentBeads, _ := rigBeads.ListAgentBeads()
+				if rigAgentBeads == nil {
+					return
 				}
-				if hookID != "" {
-					hookIDs = append(hookIDs, hookID)
-				}
-			}
+				mergeAgentBeads(rigAgentBeads)
+			}(r)
+		}
 
-			if len(hookIDs) == 0 {
-				return
-			}
-			hookBeads, _ := rigBeads.ShowMultiple(hookIDs)
-			mergeHookBeads(hookBeads)
-		}(r)
+		beadsWg.Wait()
 	}
-
-	beadsWg.Wait()
 
 	// Create mail router for inbox lookups
 	mailRouter := mail.NewRouter(townRoot)
 
+	// Pre-compute crew lists once per rig from discovered rig metadata.
+	// DiscoverRigs already scans crew directories, so avoid a second pass that
+	// would spawn extra git subprocesses via crew manager helpers.
+	crewByRig := make([][]string, len(rigs))
+	for i, r := range rigs {
+		if len(r.Crew) == 0 {
+			continue
+		}
+		crewByRig[i] = append([]string(nil), r.Crew...)
+	}
+
 	// Load overseer config
 	var overseerInfo *OverseerInfo
+	var overseerAddress string
 	if overseerConfig, err := config.LoadOrDetectOverseer(townRoot); err == nil && overseerConfig != nil {
 		overseerInfo = &OverseerInfo{
 			Name:     overseerConfig.Name,
@@ -358,12 +373,33 @@ func runStatusOnce(_ *cobra.Command, _ []string) error {
 			Username: overseerConfig.Username,
 			Source:   overseerConfig.Source,
 		}
-		// Get overseer mail count (skip in --fast mode)
-		if !statusFast {
-			if mailbox, err := mailRouter.GetMailbox("overseer"); err == nil {
-				_, unread, _ := mailbox.Count()
-				overseerInfo.UnreadMail = unread
+		overseerAddress = "overseer"
+	}
+
+	mailSummaries := make(map[string]mail.AddressSummary)
+	if !statusFast {
+		var mailAddresses []string
+		mailAddresses = append(mailAddresses, "mayor/", "deacon/")
+		if overseerAddress != "" {
+			mailAddresses = append(mailAddresses, overseerAddress)
+		}
+		for i, r := range rigs {
+			for _, polecat := range r.Polecats {
+				mailAddresses = append(mailAddresses, r.Name+"/"+polecat)
 			}
+			for _, crewName := range crewByRig[i] {
+				mailAddresses = append(mailAddresses, r.Name+"/crew/"+crewName)
+			}
+			if r.HasWitness {
+				mailAddresses = append(mailAddresses, r.Name+"/witness")
+			}
+			if r.HasRefinery {
+				mailAddresses = append(mailAddresses, r.Name+"/refinery")
+			}
+		}
+		mailSummaries = mailRouter.SummarizeAddresses(mailAddresses)
+		if overseerInfo != nil {
+			overseerInfo.UnreadMail = mailSummaries[overseerAddress].Unread
 		}
 	}
 
@@ -381,7 +417,7 @@ func runStatusOnce(_ *cobra.Command, _ []string) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		status.Agents = discoverGlobalAgents(allSessions, allAgentBeads, allHookBeads, mailRouter, statusFast)
+		status.Agents = discoverGlobalAgents(allSessions, allAgentBeads, allHookBeads, mailSummaries, statusFast)
 	}()
 
 	// Process all rigs in parallel
@@ -399,37 +435,38 @@ func runStatusOnce(_ *cobra.Command, _ []string) error {
 				HasRefinery:  r.HasRefinery,
 			}
 
-			// Count crew workers
-			crewGit := git.NewGit(r.Path)
-			crewMgr := crew.NewManager(r, crewGit)
-			if workers, err := crewMgr.List(); err == nil {
-				for _, w := range workers {
-					rs.Crews = append(rs.Crews, w.Name)
-				}
-				rs.CrewCount = len(workers)
-			}
+			rs.Crews = append(rs.Crews, crewByRig[idx]...)
+			rs.CrewCount = len(crewByRig[idx])
 
-			// Discover hooks for all agents in this rig
-			// In --fast mode, skip expensive handoff bead lookups. Hook info comes from
-			// preloaded agent beads via discoverRigAgents instead.
-			if !statusFast {
-				rs.Hooks = discoverRigHooks(r, rs.Crews)
-			}
+			// Discover runtime state for all agents in this rig
+			rs.Agents = discoverRigAgents(allSessions, r, rs.Crews, allAgentBeads, allHookBeads, mailSummaries, statusFast)
+
+			// Build hook summary directly from agent bead state.
+			// This avoids an extra pinned-issue query per agent.
 			activeHooks := 0
-			for _, hook := range rs.Hooks {
-				if hook.HasWork {
-					activeHooks++
+			if !statusFast {
+				for _, agent := range rs.Agents {
+					hook := AgentHookInfo{
+						Agent:    agent.Address,
+						Role:     agent.Role,
+						HasWork:  agent.HasWork,
+						Molecule: agent.HookBead,
+						Title:    agent.WorkTitle,
+					}
+					rs.Hooks = append(rs.Hooks, hook)
+					if agent.HasWork {
+						activeHooks++
+					}
 				}
 			}
 			rigActiveHooks[idx] = activeHooks
 
-			// Discover runtime state for all agents in this rig
-			rs.Agents = discoverRigAgents(allSessions, r, rs.Crews, allAgentBeads, allHookBeads, mailRouter, statusFast)
-
-			// Get MQ and beads summaries
-			// Skip in --fast mode to avoid expensive bd queries
-			if !statusFast {
+			// Get MQ summary if explicitly requested and not in --fast mode.
+			if !statusFast && statusMQ {
 				rs.MQ = getMQSummary(r)
+			}
+			// Beads stats remain tied to full mode regardless of MQ visibility.
+			if !statusFast {
 				rs.Beads = getBeadsStats(r)
 			}
 
@@ -659,8 +696,8 @@ func renderAgentDetails(agent AgentRuntime, indent string, hooks []AgentHookInfo
 	case "muted", "paused", "degraded":
 		// Other intentional non-observable states
 		stateInfo = style.Dim.Render(fmt.Sprintf(" [%s]", beadState))
-	// Ignore observable states: "running", "idle", "dead", "done", "stopped", ""
-	// These should be derived from tmux, not bead.
+		// Ignore observable states: "running", "idle", "dead", "done", "stopped", ""
+		// These should be derived from tmux, not bead.
 	}
 
 	// Build agent bead ID using canonical naming: prefix-rig-role-name
@@ -883,7 +920,7 @@ func buildStatusIndicator(agent AgentRuntime) string {
 		indicator += style.Dim.Render(" gate")
 	case "muted", "paused", "degraded":
 		indicator += style.Dim.Render(" " + beadState)
-	// Ignore observable states: running, idle, dead, done, stopped, ""
+		// Ignore observable states: running, idle, dead, done, stopped, ""
 	}
 
 	return indicator
@@ -920,47 +957,12 @@ func capitalizeFirst(s string) string {
 	return string(s[0]-32) + s[1:]
 }
 
-// discoverRigHooks finds all hook attachments for agents in a rig.
-// It scans polecats, crew workers, witness, and refinery for handoff beads.
-func discoverRigHooks(r *rig.Rig, crews []string) []AgentHookInfo {
-	var hooks []AgentHookInfo
-
-	// Create beads instance for the rig
-	b := beads.New(r.Path)
-
-	// Check polecats
-	for _, name := range r.Polecats {
-		hook := getAgentHook(b, name, r.Name+"/"+name, "polecat")
-		hooks = append(hooks, hook)
-	}
-
-	// Check crew workers
-	for _, name := range crews {
-		hook := getAgentHook(b, name, r.Name+"/crew/"+name, "crew")
-		hooks = append(hooks, hook)
-	}
-
-	// Check witness
-	if r.HasWitness {
-		hook := getAgentHook(b, "witness", r.Name+"/witness", "witness")
-		hooks = append(hooks, hook)
-	}
-
-	// Check refinery
-	if r.HasRefinery {
-		hook := getAgentHook(b, "refinery", r.Name+"/refinery", "refinery")
-		hooks = append(hooks, hook)
-	}
-
-	return hooks
-}
-
 // discoverGlobalAgents checks runtime state for town-level agents (Mayor, Deacon).
 // Uses parallel fetching for performance. If skipMail is true, mail lookups are skipped.
 // allSessions is a preloaded map of tmux sessions for O(1) lookup.
 // allAgentBeads is a preloaded map of agent beads for O(1) lookup.
 // allHookBeads is a preloaded map of hook beads for O(1) lookup.
-func discoverGlobalAgents(allSessions map[string]bool, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
+func discoverGlobalAgents(allSessions map[string]bool, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailSummaries map[string]mail.AddressSummary, skipMail bool) []AgentRuntime {
 	// Get session names dynamically
 	mayorSession := getMayorSessionName()
 	deaconSession := getDeaconSessionName()
@@ -1026,7 +1028,7 @@ func discoverGlobalAgents(allSessions map[string]bool, allAgentBeads map[string]
 
 			// Get mail info (skip if --fast)
 			if !skipMail {
-				populateMailInfo(&agent, mailRouter)
+				applyMailSummary(&agent, mailSummaries)
 			}
 
 			agents[idx] = agent
@@ -1037,22 +1039,17 @@ func discoverGlobalAgents(allSessions map[string]bool, allAgentBeads map[string]
 	return agents
 }
 
-// populateMailInfo fetches unread mail count and first subject for an agent
-func populateMailInfo(agent *AgentRuntime, router *mail.Router) {
-	if router == nil {
+// applyMailSummary applies precomputed unread mail summary for an agent.
+func applyMailSummary(agent *AgentRuntime, summaries map[string]mail.AddressSummary) {
+	if agent == nil || summaries == nil {
 		return
 	}
-	mailbox, err := router.GetMailbox(agent.Address)
-	if err != nil {
+	summary, ok := summaries[agent.Address]
+	if !ok {
 		return
 	}
-	_, unread, _ := mailbox.Count()
-	agent.UnreadMail = unread
-	if unread > 0 {
-		if messages, err := mailbox.ListUnread(); err == nil && len(messages) > 0 {
-			agent.FirstSubject = messages[0].Subject
-		}
-	}
+	agent.UnreadMail = summary.Unread
+	agent.FirstSubject = summary.FirstSubject
 }
 
 // agentDef defines an agent to discover
@@ -1069,7 +1066,7 @@ type agentDef struct {
 // allSessions is a preloaded map of tmux sessions for O(1) lookup.
 // allAgentBeads is a preloaded map of agent beads for O(1) lookup.
 // allHookBeads is a preloaded map of hook beads for O(1) lookup.
-func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
+func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailSummaries map[string]mail.AddressSummary, skipMail bool) []AgentRuntime {
 	// Build list of all agents to discover
 	var defs []agentDef
 	townRoot := filepath.Dir(r.Path)
@@ -1166,7 +1163,7 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 
 			// Get mail info (skip if --fast)
 			if !skipMail {
-				populateMailInfo(&agent, mailRouter)
+				applyMailSummary(&agent, mailSummaries)
 			}
 
 			agents[idx] = agent
@@ -1278,32 +1275,4 @@ func getBeadsStats(r *rig.Rig) *BeadsStats {
 		Blocked:    stats.BlockedIssues,
 		Ready:      stats.ReadyIssues,
 	}
-}
-
-// getAgentHook retrieves hook status for a specific agent.
-func getAgentHook(b *beads.Beads, role, agentAddress, roleType string) AgentHookInfo {
-	hook := AgentHookInfo{
-		Agent: agentAddress,
-		Role:  roleType,
-	}
-
-	// Find handoff bead for this role
-	handoff, err := b.FindHandoffBead(role)
-	if err != nil || handoff == nil {
-		return hook
-	}
-
-	// Check for attachment
-	attachment := beads.ParseAttachmentFields(handoff)
-	if attachment != nil && attachment.AttachedMolecule != "" {
-		hook.HasWork = true
-		hook.Molecule = attachment.AttachedMolecule
-		hook.Title = handoff.Title
-	} else if handoff.Description != "" {
-		// Has content but no molecule - still has work
-		hook.HasWork = true
-		hook.Title = handoff.Title
-	}
-
-	return hook
 }
