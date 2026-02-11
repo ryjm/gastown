@@ -37,10 +37,10 @@ var validSessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // Common errors
 var (
-	ErrNoServer            = errors.New("no tmux server running")
-	ErrSessionExists       = errors.New("session already exists")
-	ErrSessionNotFound     = errors.New("session not found")
-	ErrInvalidSessionName  = errors.New("invalid session name")
+	ErrNoServer           = errors.New("no tmux server running")
+	ErrSessionExists      = errors.New("session already exists")
+	ErrSessionNotFound    = errors.New("session not found")
+	ErrInvalidSessionName = errors.New("invalid session name")
 )
 
 // validateSessionName checks that a session name contains only safe characters.
@@ -626,6 +626,41 @@ func (t *Tmux) ListSessions() ([]string, error) {
 	}
 
 	return strings.Split(out, "\n"), nil
+}
+
+// ListSessionPaneCommands returns pane commands grouped by session name.
+// Uses a single tmux call for all sessions/panes to avoid N+1 subprocess overhead.
+func (t *Tmux) ListSessionPaneCommands() (map[string][]string, error) {
+	out, err := t.run("list-panes", "-a", "-F", "#{session_name}\t#{pane_current_command}")
+	if err != nil {
+		if errors.Is(err, ErrNoServer) {
+			return map[string][]string{}, nil
+		}
+		return nil, err
+	}
+
+	result := make(map[string][]string)
+	if strings.TrimSpace(out) == "" {
+		return result, nil
+	}
+
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		session := strings.TrimSpace(parts[0])
+		command := strings.TrimSpace(parts[1])
+		if session == "" {
+			continue
+		}
+		result[session] = append(result[session], command)
+	}
+
+	return result, nil
 }
 
 // SessionSet provides O(1) session existence checks by caching session names.

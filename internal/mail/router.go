@@ -33,6 +33,46 @@ type Router struct {
 	tmux     *tmux.Tmux
 }
 
+// AddressSummary is a lightweight unread summary for a mailbox address.
+type AddressSummary struct {
+	Unread       int
+	FirstSubject string
+}
+
+type mailboxTarget struct {
+	address string
+	mailbox *Mailbox
+}
+
+type summaryAccumulator struct {
+	seenIDs      map[string]struct{}
+	unread       int
+	firstSubject string
+	firstTime    int64
+}
+
+func (a *summaryAccumulator) add(msg *Message) {
+	if msg == nil {
+		return
+	}
+	if a.seenIDs == nil {
+		a.seenIDs = make(map[string]struct{})
+	}
+	if _, exists := a.seenIDs[msg.ID]; exists {
+		return
+	}
+	a.seenIDs[msg.ID] = struct{}{}
+	if msg.Read {
+		return
+	}
+	a.unread++
+	ts := msg.Timestamp.UnixNano()
+	if a.firstSubject == "" || ts > a.firstTime {
+		a.firstTime = ts
+		a.firstSubject = msg.Subject
+	}
+}
+
 // NewRouter creates a new mail router.
 // workDir should be a directory containing a .beads database.
 // The town root is auto-detected from workDir if possible.
@@ -1189,12 +1229,116 @@ func isSelfMail(from, to string) bool {
 func (r *Router) GetMailbox(address string) (*Mailbox, error) {
 	beadsDir := r.resolveBeadsDir(address)
 	workDir := filepath.Dir(beadsDir) // Parent of .beads
-	// Use NewMailboxWithBeadsDir to avoid re-resolving the beads directory.
-	// This ensures consistency with the send path which uses r.resolveBeadsDir()
-	// directly. Using NewMailboxFromAddress would call beads.ResolveBeadsDir()
-	// again, potentially following redirects and querying a different location
-	// than where messages were written.
 	return NewMailboxWithBeadsDir(address, workDir, beadsDir), nil
+}
+
+// SummarizeAddresses returns unread counts and first unread subject for addresses.
+// It batches beads-backed lookups by beads directory to avoid N mailbox scans.
+func (r *Router) SummarizeAddresses(addresses []string) map[string]AddressSummary {
+	summaries := make(map[string]AddressSummary, len(addresses))
+	if len(addresses) == 0 {
+		return summaries
+	}
+
+	seen := make(map[string]struct{}, len(addresses))
+	groups := make(map[string][]mailboxTarget)
+
+	for _, address := range addresses {
+		if address == "" {
+			continue
+		}
+		if _, exists := seen[address]; exists {
+			continue
+		}
+		seen[address] = struct{}{}
+
+		mailbox, err := r.GetMailbox(address)
+		if err != nil || mailbox == nil {
+			continue
+		}
+		if mailbox.legacy {
+			unread, first := summarizeLegacyMailbox(mailbox)
+			summaries[address] = AddressSummary{
+				Unread:       unread,
+				FirstSubject: first,
+			}
+			continue
+		}
+		key := mailbox.workDir + "\x00" + mailbox.beadsDir
+		groups[key] = append(groups[key], mailboxTarget{
+			address: address,
+			mailbox: mailbox,
+		})
+	}
+
+	for _, targets := range groups {
+		if len(targets) == 0 {
+			continue
+		}
+		beadsMsgs, err := listAllBeadsMessages(targets[0].mailbox.workDir, targets[0].mailbox.beadsDir)
+		if err != nil {
+			continue
+		}
+
+		assigneeMatch := make(map[string][]int, len(targets)*2)
+		ccMatch := make(map[string][]int, len(targets)*2)
+		acc := make([]summaryAccumulator, len(targets))
+		for idx, target := range targets {
+			// Deduplicate identity variants for this mailbox.
+			seenIdentity := make(map[string]struct{})
+			for _, identity := range target.mailbox.identityVariants() {
+				if _, exists := seenIdentity[identity]; exists {
+					continue
+				}
+				seenIdentity[identity] = struct{}{}
+				assigneeMatch[identity] = append(assigneeMatch[identity], idx)
+				ccMatch["cc:"+identity] = append(ccMatch["cc:"+identity], idx)
+			}
+		}
+
+		for i := range beadsMsgs {
+			bm := &beadsMsgs[i]
+			matched := make(map[int]struct{})
+
+			if (bm.Status == "open" || bm.Status == "hooked") && bm.Assignee != "" {
+				for _, idx := range assigneeMatch[bm.Assignee] {
+					matched[idx] = struct{}{}
+				}
+			}
+			if bm.Status == "open" {
+				for _, label := range bm.Labels {
+					for _, idx := range ccMatch[label] {
+						matched[idx] = struct{}{}
+					}
+				}
+			}
+			if len(matched) == 0 {
+				continue
+			}
+
+			msg := bm.ToMessage()
+			for idx := range matched {
+				acc[idx].add(msg)
+			}
+		}
+
+		for idx, target := range targets {
+			summaries[target.address] = AddressSummary{
+				Unread:       acc[idx].unread,
+				FirstSubject: acc[idx].firstSubject,
+			}
+		}
+	}
+
+	return summaries
+}
+
+func summarizeLegacyMailbox(mailbox *Mailbox) (unread int, first string) {
+	messages, err := mailbox.ListUnread()
+	if err != nil || len(messages) == 0 {
+		return 0, ""
+	}
+	return len(messages), messages[0].Subject
 }
 
 // notifyRecipient sends a notification to a recipient's tmux session.

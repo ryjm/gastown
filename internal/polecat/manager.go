@@ -1040,8 +1040,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 
 	// Determine the start point for the new worktree
 	// Use origin/<default-branch> to ensure we start from latest fetched commits
-	// Auto-detect main vs master from remote, allow rig config override
-	defaultBranch := repoGit.RemoteDefaultBranch()
+	defaultBranch := "main"
 	if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
@@ -1619,8 +1618,8 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 		return nil, nil
 	}
 
-	// Get default branch - auto-detect from remote, allow rig config override
-	defaultBranch := m.git.RemoteDefaultBranch()
+	// Get default branch from rig config
+	defaultBranch := "main"
 	if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
