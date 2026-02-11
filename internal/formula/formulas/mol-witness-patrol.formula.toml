@@ -2,9 +2,9 @@ description = "Per-rig worker monitor patrol loop.\n\nThe Witness is the Pit Bos
 formula = 'mol-witness-patrol'
 version = 2
 
-[vars]
 [vars.wisp_type]
-description = "Type of wisp created for this molecule"
+description = "Type of wisp (default: patrol)"
+required = false
 default = "patrol"
 
 [[steps]]
