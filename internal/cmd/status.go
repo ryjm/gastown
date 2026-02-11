@@ -101,8 +101,19 @@ type RigStatus struct {
 	HasWitness   bool            `json:"has_witness"`
 	HasRefinery  bool            `json:"has_refinery"`
 	Hooks        []AgentHookInfo `json:"hooks,omitempty"`
-	Agents       []AgentRuntime  `json:"agents,omitempty"` // Runtime state of all agents in rig
-	MQ           *MQSummary      `json:"mq,omitempty"`     // Merge queue summary
+	Agents       []AgentRuntime  `json:"agents,omitempty"`      // Runtime state of all agents in rig
+	MQ           *MQSummary      `json:"mq,omitempty"`          // Merge queue summary
+	Beads        *BeadsStats     `json:"beads_stats,omitempty"` // Issue statistics
+}
+
+// BeadsStats represents aggregate issue statistics for a rig.
+type BeadsStats struct {
+	Total      int `json:"total"`
+	Open       int `json:"open"`
+	InProgress int `json:"in_progress"`
+	Closed     int `json:"closed"`
+	Blocked    int `json:"blocked"`
+	Ready      int `json:"ready"`
 }
 
 // MQSummary represents the merge queue status for a rig.
@@ -438,10 +449,11 @@ func gatherStatus() (TownStatus, error) {
 			// Discover runtime state for all agents in this rig
 			rs.Agents = discoverRigAgents(allSessions, r, rs.Crews, allAgentBeads, allHookBeads, mailRouter, statusFast)
 
-			// Get MQ summary if rig has a refinery
+			// Get MQ and beads summaries
 			// Skip in --fast mode to avoid expensive bd queries
 			if !statusFast {
 				rs.MQ = getMQSummary(r)
+				rs.Beads = getBeadsStats(r)
 			}
 
 			status.Rigs[idx] = rs
@@ -1256,6 +1268,34 @@ func getMQSummary(r *rig.Rig) *MQSummary {
 		Blocked:  blocked,
 		State:    state,
 		Health:   health,
+	}
+}
+
+// getBeadsStats queries beads for issue statistics and returns a summary.
+// Returns nil if the rig has no beads database or on error.
+func getBeadsStats(r *rig.Rig) *BeadsStats {
+	b := beads.New(r.BeadsPath())
+	if !b.IsBeadsRepo() {
+		return nil
+	}
+
+	stats, err := b.StatsJSON()
+	if err != nil {
+		return nil
+	}
+
+	// Return nil if no issues at all
+	if stats.TotalIssues == 0 {
+		return nil
+	}
+
+	return &BeadsStats{
+		Total:      stats.TotalIssues,
+		Open:       stats.OpenIssues,
+		InProgress: stats.InProgressIssues,
+		Closed:     stats.ClosedIssues,
+		Blocked:    stats.BlockedIssues,
+		Ready:      stats.ReadyIssues,
 	}
 }
 

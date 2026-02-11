@@ -868,6 +868,34 @@ func (b *Beads) Stats() (string, error) {
 	return string(out), nil
 }
 
+// StatsSummary holds structured statistics from bd stats --json.
+type StatsSummary struct {
+	TotalIssues      int     `json:"total_issues"`
+	OpenIssues       int     `json:"open_issues"`
+	InProgressIssues int     `json:"in_progress_issues"`
+	ClosedIssues     int     `json:"closed_issues"`
+	BlockedIssues    int     `json:"blocked_issues"`
+	ReadyIssues      int     `json:"ready_issues"`
+	AvgLeadTimeHours float64 `json:"average_lead_time_hours"`
+}
+
+// StatsJSON returns structured repository statistics.
+func (b *Beads) StatsJSON() (*StatsSummary, error) {
+	out, err := b.run("stats", "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		Summary StatsSummary `json:"summary"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("parsing bd stats --json output: %w", err)
+	}
+
+	return &raw.Summary, nil
+}
+
 // IsBeadsRepo checks if the working directory is a beads repository.
 // ZFC: Check file existence directly instead of parsing bd errors.
 func (b *Beads) IsBeadsRepo() bool {
