@@ -196,6 +196,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// Sparse checkout migration (runs across all rigs, not just --rig mode)
 	d.Register(doctor.NewSparseCheckoutCheck())
 
+	// Sparse checkout migration (runs across all rigs, not just --rig mode)
+	d.Register(doctor.NewSparseCheckoutCheck())
+
 	// Priming subsystem check
 	d.Register(doctor.NewPrimingCheck())
 
