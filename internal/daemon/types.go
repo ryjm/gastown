@@ -200,11 +200,6 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		if config.Patrols.Deacon != nil {
 			return config.Patrols.Deacon.Enabled
 		}
-	case "dolt_remotes":
-		if config.Patrols.DoltRemotes != nil {
-			return config.Patrols.DoltRemotes.Enabled
-		}
-		return false // Default: disabled (opt-in)
 	}
 	return true // Default: enabled
 }
