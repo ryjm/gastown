@@ -498,17 +498,30 @@ func runDone(cmd *cobra.Command, args []string) error {
 			description += "\nconflict_task_id: null"
 
 			// Create MR bead (ephemeral wisp - will be cleaned up after merge)
-			mrIssue, err := bd.Create(beads.CreateOptions{
-				Title:       title,
-				Type:        "merge-request",
-				Priority:    priority,
-				Description: description,
-				Ephemeral:   true,
-			})
+			// Retry with backoff to handle transient SQLite contention when
+			// multiple polecats complete simultaneously (all write to town root db).
+			var mrIssue *beads.Issue
+			for attempt := 0; attempt < 3; attempt++ {
+				mrIssue, err = bd.Create(beads.CreateOptions{
+					Title:       title,
+					Type:        "merge-request",
+					Priority:    priority,
+					Description: description,
+					Ephemeral:   true,
+				})
+				if err == nil {
+					break
+				}
+				if attempt < 2 {
+					delay := time.Duration(1<<uint(attempt)) * 500 * time.Millisecond // 500ms, 1s
+					style.PrintWarning("MR bead creation attempt %d failed: %v (retrying in %v)", attempt+1, err, delay)
+					time.Sleep(delay)
+				}
+			}
 			if err != nil {
 				// Non-fatal: record the error and skip to notifyWitness.
 				// Push succeeded so branch is on remote, but MR bead failed.
-				errMsg := fmt.Sprintf("MR bead creation failed: %v", err)
+				errMsg := fmt.Sprintf("MR bead creation failed after 3 attempts: %v", err)
 				doneErrors = append(doneErrors, errMsg)
 				style.PrintWarning("%s\nBranch is pushed but MR bead not created. Witness will be notified.", errMsg)
 				goto notifyWitness

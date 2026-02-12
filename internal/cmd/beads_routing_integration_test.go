@@ -25,15 +25,6 @@ func setupRoutingTestTown(t *testing.T) string {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
 
-	// Create mayor/town.json so FindTownRoot() can detect this as a Gas Town root
-	mayorDir := filepath.Join(townRoot, "mayor")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
-		t.Fatalf("mkdir mayor: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
-		t.Fatalf("write town.json: %v", err)
-	}
-
 	// Create town-level .beads directory
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
@@ -119,7 +110,7 @@ func setupRoutingTestTown(t *testing.T) string {
 func initBeadsDBWithPrefix(t *testing.T, dir, prefix string) {
 	t.Helper()
 
-	cmd := exec.Command("bd", "init", "--quiet", "--prefix", prefix, "--backend", "dolt")
+	cmd := exec.Command("bd", "init", "--quiet", "--prefix", prefix)
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init failed in %s: %v\n%s", dir, err, output)
