@@ -1089,6 +1089,43 @@ func DetectZombiePolecats(workDir, rigName string, router *mail.Router) *DetectZ
 					// Notify convoys about the closed bead (gt-nsteq7)
 					convoy.CheckConvoysForIssue(townRoot, hookBead, "witness-zombie", nil)
 					result.Zombies = append(result.Zombies, zombie)
+				} else if t.IsIdleAtPrompt(sessionName) {
+					// Agent is alive but sitting at an idle prompt. This is the
+					// "idle polecat heresy" — a polecat that finished work but
+					// didn't run gt done, leaving the session occupying a slot.
+					// See: gt-nyf
+					//
+					// Escalation strategy: nudge first, nuke on repeated detection.
+					// - First detection: add idle-at-prompt label + nudge
+					// - Subsequent detection (>5min old): nuke
+					idleIntent := extractIdleAtPrompt(labels)
+					if idleIntent == nil {
+						// First detection — record timestamp and nudge
+						idleLabel := fmt.Sprintf("idle-at-prompt:%d", time.Now().Unix())
+						_ = addBeadLabel(workDir, agentBeadID, idleLabel)
+						nudgeMsg := "[from witness] You appear idle at the prompt. If your work is done, run `gt done`. If you're stuck, run `gt escalate`."
+						_ = t.NudgeSession(sessionName, nudgeMsg)
+						result.Zombies = append(result.Zombies, ZombieResult{
+							PolecatName: polecatName,
+							AgentState:  "idle-at-prompt",
+							HookBead:    hookBead,
+							Action:      "nudged",
+						})
+					} else if time.Since(idleIntent.Timestamp) > 5*time.Minute {
+						// Persistent idle — polecat ignored nudge for >5min. Nuke.
+						zombie := ZombieResult{
+							PolecatName: polecatName,
+							AgentState:  "idle-at-prompt",
+							HookBead:    hookBead,
+							Action:      fmt.Sprintf("nuked-persistent-idle (age=%v)", time.Since(idleIntent.Timestamp).Round(time.Second)),
+						}
+						if err := NukePolecat(workDir, rigName, polecatName); err != nil {
+							zombie.Error = err
+							zombie.Action = fmt.Sprintf("nuke-idle-failed: %v", err)
+						}
+						result.Zombies = append(result.Zombies, zombie)
+					}
+					// else: recently nudged, give it more time
 				}
 			}
 			continue // Either handled or not a zombie
@@ -1304,6 +1341,39 @@ func extractDoneIntent(labels []string) *DoneIntent {
 		}
 	}
 	return nil
+}
+
+// IdleAtPrompt represents a parsed idle-at-prompt:<unix-ts> label.
+type IdleAtPrompt struct {
+	Timestamp time.Time
+}
+
+// extractIdleAtPrompt parses an idle-at-prompt:<unix-ts> label from a label list.
+// Returns nil if no idle-at-prompt label is found or if the label is malformed.
+func extractIdleAtPrompt(labels []string) *IdleAtPrompt {
+	for _, label := range labels {
+		if !strings.HasPrefix(label, "idle-at-prompt:") {
+			continue
+		}
+		// Format: idle-at-prompt:<unix-ts>
+		parts := strings.SplitN(label, ":", 2)
+		if len(parts) != 2 {
+			return nil
+		}
+		ts, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return nil
+		}
+		return &IdleAtPrompt{
+			Timestamp: time.Unix(ts, 0),
+		}
+	}
+	return nil
+}
+
+// addBeadLabel adds a label to a bead via bd update --add-labels.
+func addBeadLabel(workDir, beadID, label string) error {
+	return util.ExecRun(workDir, "bd", "update", beadID, "--add-labels="+label)
 }
 
 // getAgentBeadLabels reads the labels from an agent bead.

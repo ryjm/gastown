@@ -1461,6 +1461,48 @@ func (t *Tmux) IsAgentAlive(session string) bool {
 	return t.IsRuntimeRunning(session, processNames)
 }
 
+// IsIdleAtPrompt checks if a session is showing an idle agent prompt.
+// It captures the last few lines of the pane and checks if the last non-empty
+// line starts with the agent's prompt prefix (e.g., "❯ " for Claude Code).
+// This detects the "idle polecat" state where the agent process is alive but
+// sitting at the input prompt without doing any work.
+//
+// Returns true if the pane shows an idle prompt, false otherwise (including
+// on any error — fail-safe to avoid false positives).
+func (t *Tmux) IsIdleAtPrompt(session string) bool {
+	// Get the agent type from the session environment
+	agentName, _ := t.GetEnvironment(session, "GT_AGENT")
+	promptPrefix := config.GetPromptPrefix(agentName)
+	if promptPrefix == "" {
+		return false // Can't detect prompt for this agent type
+	}
+
+	// Capture the last 20 lines of the pane
+	lines, err := t.CapturePaneLines(session, 20)
+	if err != nil || len(lines) == 0 {
+		return false
+	}
+
+	// Find the last non-empty line
+	var lastLine string
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed != "" {
+			lastLine = trimmed
+			break
+		}
+	}
+
+	if lastLine == "" {
+		return false
+	}
+
+	// Check if the last non-empty line is just the prompt prefix (waiting for input).
+	// The prompt line should be JUST the prompt character or prompt + cursor,
+	// not a line with output text that happens to contain the character.
+	return lastLine == strings.TrimSpace(promptPrefix)
+}
+
 // WaitForCommand polls until the pane is NOT running one of the excluded commands.
 // Useful for waiting until a shell has started a new process (e.g., claude).
 // Returns nil when a non-excluded command is detected, or error on timeout.

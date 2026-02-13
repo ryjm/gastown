@@ -495,3 +495,81 @@ func TestDetectZombie_BeadClosedVsDoneIntent(t *testing.T) {
 		t.Error("closed-bead check should not run when done-intent exists")
 	}
 }
+
+// --- extractIdleAtPrompt tests (gt-nyf: idle-at-prompt detection) ---
+
+func TestExtractIdleAtPrompt_Valid(t *testing.T) {
+	ts := time.Now().Add(-3 * time.Minute)
+	labels := []string{
+		"gt:agent",
+		fmt.Sprintf("idle-at-prompt:%d", ts.Unix()),
+	}
+
+	idle := extractIdleAtPrompt(labels)
+	if idle == nil {
+		t.Fatal("extractIdleAtPrompt returned nil for valid label")
+	}
+	if idle.Timestamp.Unix() != ts.Unix() {
+		t.Errorf("Timestamp = %d, want %d", idle.Timestamp.Unix(), ts.Unix())
+	}
+}
+
+func TestExtractIdleAtPrompt_Missing(t *testing.T) {
+	labels := []string{"gt:agent", "idle:2", "backoff-until:1738972900"}
+
+	idle := extractIdleAtPrompt(labels)
+	if idle != nil {
+		t.Errorf("extractIdleAtPrompt = %+v, want nil for no idle-at-prompt label", idle)
+	}
+}
+
+func TestExtractIdleAtPrompt_Malformed(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+	}{
+		{"bad timestamp", []string{"idle-at-prompt:notanumber"}},
+		{"empty labels", nil},
+		{"empty label list", []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idle := extractIdleAtPrompt(tt.labels)
+			if idle != nil {
+				t.Errorf("extractIdleAtPrompt(%v) = %+v, want nil for malformed input", tt.labels, idle)
+			}
+		})
+	}
+}
+
+func TestIdleAtPrompt_EscalationLogic(t *testing.T) {
+	// Test: first detection (no label) should nudge
+	labels := []string{"gt:agent"}
+	idle := extractIdleAtPrompt(labels)
+	if idle != nil {
+		t.Error("expected nil for first detection (no idle-at-prompt label)")
+	}
+
+	// Test: recent detection (<5min) should wait
+	recentTs := time.Now().Add(-2 * time.Minute)
+	labels = []string{"gt:agent", fmt.Sprintf("idle-at-prompt:%d", recentTs.Unix())}
+	idle = extractIdleAtPrompt(labels)
+	if idle == nil {
+		t.Fatal("expected non-nil for existing idle-at-prompt label")
+	}
+	if time.Since(idle.Timestamp) > 5*time.Minute {
+		t.Error("recent idle-at-prompt should not trigger nuke (< 5min)")
+	}
+
+	// Test: old detection (>5min) should trigger nuke
+	oldTs := time.Now().Add(-10 * time.Minute)
+	labels = []string{"gt:agent", fmt.Sprintf("idle-at-prompt:%d", oldTs.Unix())}
+	idle = extractIdleAtPrompt(labels)
+	if idle == nil {
+		t.Fatal("expected non-nil for old idle-at-prompt label")
+	}
+	if time.Since(idle.Timestamp) <= 5*time.Minute {
+		t.Error("old idle-at-prompt should trigger nuke (> 5min)")
+	}
+}
