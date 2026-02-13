@@ -1552,3 +1552,45 @@ func TestNewSessionWithCommandAndEnvEmpty(t *testing.T) {
 		t.Fatal("expected session to exist after creation with empty env")
 	}
 }
+
+func TestIsIdleAtPrompt_ShellSession(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("test requires unix")
+	}
+
+	tm := NewTmux()
+	sessionName := fmt.Sprintf("gt-test-idle-%d", time.Now().UnixNano())
+
+	// Create a session with just a shell — no GT_AGENT set.
+	// IsIdleAtPrompt should return false (fail-safe) since the pane
+	// won't show a Claude prompt character.
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	// Give the shell a moment to render its prompt
+	time.Sleep(500 * time.Millisecond)
+
+	// A plain shell session should NOT be detected as idle-at-prompt
+	// because there's no Claude prompt prefix (❯).
+	if tm.IsIdleAtPrompt(sessionName) {
+		t.Error("IsIdleAtPrompt returned true for plain shell session, expected false")
+	}
+}
+
+func TestIsIdleAtPrompt_NoSession(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := NewTmux()
+
+	// Non-existent session should return false (fail-safe)
+	if tm.IsIdleAtPrompt("gt-test-nonexistent-session") {
+		t.Error("IsIdleAtPrompt returned true for non-existent session, expected false")
+	}
+}

@@ -437,6 +437,20 @@ func GetProcessNames(agentName string) []string {
 	return info.ProcessNames
 }
 
+// GetPromptPrefix returns the prompt prefix for a given agent name.
+// Used by idle-at-prompt detection to identify when a polecat is sitting
+// at the Claude Code prompt without doing work. Defaults to Claude's "❯ ".
+func GetPromptPrefix(agentName string) string {
+	// Currently all supported runtimes use provider-based defaults.
+	// Read from the preset's provider to get the right prefix.
+	info := GetAgentPresetByName(agentName)
+	if info != nil {
+		return defaultReadyPromptPrefix(string(info.Name))
+	}
+	// Default to Claude's prompt prefix
+	return defaultReadyPromptPrefix("claude")
+}
+
 // MergeWithPreset applies preset defaults to a RuntimeConfig.
 // User-specified values take precedence over preset defaults.
 // Returns a new RuntimeConfig without modifying the original.
