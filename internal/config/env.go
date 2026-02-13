@@ -124,6 +124,14 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// this empty value with intentional settings like --max-old-space-size.
 	env["NODE_OPTIONS"] = ""
 
+	// Clear CLAUDECODE to prevent nested-session detection from blocking startup.
+	// When a crew/polecat session is spawned from within a Claude Code session
+	// (e.g., crew member runs gt sling), the tmux environment inherits CLAUDECODE=1.
+	// Claude Code v2.1+ refuses to start inside another session to prevent resource
+	// conflicts. Since Gas Town sessions are isolated tmux sessions (not nested),
+	// clearing this variable is safe and necessary for agent spawning.
+	env["CLAUDECODE"] = ""
+
 	return env
 }
 
