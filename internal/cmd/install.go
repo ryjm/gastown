@@ -443,7 +443,7 @@ func initTownBeads(townPath string) error {
 
 	// Configure allowed_prefixes for convoy beads (hq-cv-* IDs).
 	// This allows bd create --id=hq-cv-xxx to pass prefix validation.
-	prefixCmd := exec.Command("bd", "config", "set", "allowed_prefixes", "hq,hq-cv")
+	prefixCmd := exec.Command("bd", "config", "set", "allowed_prefixes", "hq-,hq-cv-")
 	prefixCmd.Dir = townPath
 	if prefixOutput, prefixErr := prefixCmd.CombinedOutput(); prefixErr != nil {
 		fmt.Printf("   %s Could not set allowed_prefixes: %s\n", style.Dim.Render("⚠"), strings.TrimSpace(string(prefixOutput)))
