@@ -1682,12 +1682,9 @@ func SanitizeAgentEnv(resolvedEnv, callerEnv map[string]string) {
 
 	// CLAUDECODE causes Claude Code to refuse startup ("cannot be launched inside
 	// another Claude Code session"). Gas Town sessions are isolated tmux sessions,
-	// not nested, so clearing this is safe.
-	if _, ok := callerEnv["CLAUDECODE"]; !ok {
-		if _, ok := resolvedEnv["CLAUDECODE"]; !ok {
-			resolvedEnv["CLAUDECODE"] = ""
-		}
-	}
+	// not nested, so clearing this is safe. Always clear it — especially when
+	// the caller IS a Claude Code session (e.g., mayor slinging work).
+	resolvedEnv["CLAUDECODE"] = ""
 }
 
 // PrependEnv prepends export statements to a command string.
