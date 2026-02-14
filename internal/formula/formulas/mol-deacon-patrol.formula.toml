@@ -24,7 +24,7 @@ No WITNESS_PING mail is sent. Witnesses observe the Deacon's last_activity
 timestamp instead, and only send an alert to the Mayor if the Deacon appears
 unresponsive (>5 minutes stale). This avoids heartbeat mail spam."""
 formula = "mol-deacon-patrol"
-version = 11
+version = 12
 
 [vars]
 [vars.wisp_type]
@@ -104,9 +104,54 @@ Callbacks may spawn new polecats, update issue state, or trigger other actions.
 Keep inbox near-empty - only unprocessed items should remain."""
 
 [[steps]]
+id = "rig-sync"
+title = "Fetch and fast-forward mayor clones"
+needs = ["inbox-check"]
+description = """
+Keep mayor rig clones up to date with their origin remotes.
+
+This runs early in the patrol cycle so any subsequently dispatched work
+uses the latest code. Only performs safe operations (fetch + ff-only merge).
+
+**Rigs to sync:** beads, gastown, openclaw
+
+**For each rig:**
+```bash
+cd ~/gt/<rig>/mayor/rig
+
+# 1. Always fetch latest refs
+git fetch origin --prune
+
+# 2. Check if worktree is clean and on default branch
+BRANCH=$(git branch --show-current)
+DEFAULT=$(git remote show origin | sed -n 's/.*HEAD branch: //p')
+
+# 3. Only pull if on default branch with clean worktree
+if [ "$BRANCH" = "$DEFAULT" ]; then
+    if git diff --quiet && git diff --cached --quiet; then
+        git pull --ff-only origin "$DEFAULT"
+    else
+        # Dirty worktree - skip pull, just log
+        echo "WARN: <rig> has uncommitted changes, skipping pull"
+    fi
+else
+    # On feature branch - fetch is enough
+    echo "INFO: <rig> on branch $BRANCH (not $DEFAULT), fetch only"
+fi
+```
+
+**Error handling:**
+- Network failures: log warning and continue to next rig
+- Non-fast-forward: log warning, do NOT force pull
+- Dirty worktree: skip pull, just fetch
+- Each rig is independent - one failure doesn't stop the others
+
+**Exit criteria:** All configured rigs fetched; default-branch clones fast-forwarded where possible."""
+
+[[steps]]
 id = "orphan-process-cleanup"
 title = "Clean up orphaned claude subagent processes"
-needs = ["inbox-check"]
+needs = ["rig-sync"]
 description = """
 Clean up orphaned claude subagent processes.
 
