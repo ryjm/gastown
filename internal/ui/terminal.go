@@ -87,7 +87,13 @@ func detectDarkBackground(mode ThemeMode) bool {
 	case ThemeModeLight:
 		return false
 	default:
-		// Auto mode - use termenv detection
+		// Auto mode - use termenv detection, but only when stdout is a TTY.
+		// When stdout is a pipe (e.g., Emacs make-process, shell capture),
+		// termenv sends OSC 11 / CSI 6n escape sequences to stdout which
+		// pollute JSON output. Default to dark when not a terminal.
+		if !IsTerminal() {
+			return true
+		}
 		return termenv.HasDarkBackground()
 	}
 }
