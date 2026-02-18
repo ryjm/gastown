@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
@@ -620,6 +621,29 @@ func (d *Daemon) ensureDeaconRunning() {
 // run a patrol cycle, and write a fresh heartbeat. 5 minutes is conservative.
 const deaconGracePeriod = 5 * time.Minute
 
+const defaultDeaconStaleNudge = "HEALTH_CHECK: heartbeat stale, respond to confirm responsiveness"
+
+// deaconStaleNudgeCommand chooses a stale-heartbeat nudge that is compatible
+// with the configured runtime. Non-hook runtimes (codex/cursor/etc.) get a
+// deterministic shell command so the session performs patrol work immediately.
+func deaconStaleNudgeCommand(rc *config.RuntimeConfig) string {
+	commands := runtime.StartupFallbackCommands("deacon", rc)
+	if len(commands) == 0 {
+		return defaultDeaconStaleNudge
+	}
+	cmd := commands[0]
+	if strings.Contains(cmd, `"boot patrol"`) {
+		cmd = strings.Replace(cmd, `"boot patrol"`, `"heartbeat stale poke"`, 1)
+	}
+	return cmd
+}
+
+func (d *Daemon) deaconStaleNudgeCommand() string {
+	deaconDir := filepath.Join(d.config.TownRoot, "deacon")
+	rc := config.ResolveRoleAgentConfig("deacon", d.config.TownRoot, deaconDir)
+	return deaconStaleNudgeCommand(rc)
+}
+
 // checkDeaconHeartbeat checks if the Deacon is making progress.
 // This is a belt-and-suspenders fallback in case Boot doesn't detect stuck states.
 // Uses the heartbeat file that the Deacon updates on each patrol cycle.
@@ -680,8 +704,9 @@ func (d *Daemon) checkDeaconHeartbeat() {
 
 	age := hb.Age()
 
-	// If heartbeat is fresh, nothing to do
-	if !hb.ShouldPoke() {
+	// If heartbeat is fresh (<5m), nothing to do.
+	// For stale heartbeats (>=5m), poke or restart based on age thresholds below.
+	if hb.IsFresh() {
 		return
 	}
 
@@ -708,7 +733,7 @@ func (d *Daemon) checkDeaconHeartbeat() {
 	} else {
 		// Stuck but not critically - nudge to wake up
 		d.logger.Printf("Deacon stuck for %s - nudging session", age.Round(time.Minute))
-		if err := d.tmux.NudgeSession(sessionName, "HEALTH_CHECK: heartbeat stale, respond to confirm responsiveness"); err != nil {
+		if err := d.tmux.NudgeSession(sessionName, d.deaconStaleNudgeCommand()); err != nil {
 			d.logger.Printf("Error nudging stuck Deacon: %v", err)
 		}
 	}
