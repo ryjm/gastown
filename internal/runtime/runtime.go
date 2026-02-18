@@ -118,7 +118,18 @@ func StartupFallbackCommands(role string, rc *config.RuntimeConfig) []string {
 	}
 
 	role = strings.ToLower(role)
+	if role == "boot" {
+		// Boot must execute triage immediately on spawn.
+		// For non-hook runtimes, do this explicitly instead of waiting for prompt parsing.
+		return []string{"gt prime && gt boot triage"}
+	}
+
 	command := "gt prime"
+	if role == "deacon" {
+		// Deacon heartbeat is required for daemon startup health checks.
+		// Without this, non-hook runtimes can sit idle at prompt and appear stuck.
+		command = "gt deacon heartbeat \"boot patrol\" && " + command
+	}
 	if isAutonomousRole(role) {
 		command += " && gt mail check --inject"
 	}

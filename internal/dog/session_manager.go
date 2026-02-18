@@ -2,9 +2,9 @@
 package dog
 
 import (
-	"github.com/steveyegge/gastown/internal/cli"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/cli"
 	"os"
 	"path/filepath"
 	"time"
@@ -115,15 +115,16 @@ func (m *SessionManager) Start(dogName string, opts SessionStartOptions) error {
 			Sender:    "deacon",
 			Topic:     "assigned",
 		},
-		Instructions:   instructions,
-		AgentOverride:  opts.AgentOverride,
-		Theme:          &theme,
-		WaitForAgent:   true,
-		WaitFatal:      true,
-		AcceptBypass:   true,
-		ReadyDelay:     true,
-		VerifySurvived: true,
-		TrackPID:       true,
+		Instructions:       instructions,
+		AgentOverride:      opts.AgentOverride,
+		Theme:              &theme,
+		WaitForAgent:       true,
+		WaitFatal:          true,
+		AcceptBypass:       true,
+		ReadyDelay:         true,
+		RunStartupFallback: true,
+		VerifySurvived:     true,
+		TrackPID:           true,
 	})
 	if err != nil {
 		return err

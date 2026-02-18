@@ -215,6 +215,46 @@ func TestStartupFallbackCommands_AutonomousRole(t *testing.T) {
 	}
 }
 
+func TestStartupFallbackCommands_DeaconIncludesHeartbeat(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+	}
+
+	commands := StartupFallbackCommands("deacon", rc)
+	if len(commands) == 0 {
+		t.Fatal("StartupFallbackCommands() should return commands for deacon")
+	}
+
+	if !contains(commands[0], "gt deacon heartbeat") {
+		t.Errorf("deacon fallback should include heartbeat command, got %q", commands[0])
+	}
+	if !contains(commands[0], "gt mail check --inject") {
+		t.Errorf("deacon fallback should include mail check --inject, got %q", commands[0])
+	}
+}
+
+func TestStartupFallbackCommands_BootRunsTriage(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+	}
+
+	commands := StartupFallbackCommands("boot", rc)
+	if len(commands) == 0 {
+		t.Fatal("StartupFallbackCommands() should return commands for boot")
+	}
+
+	if !contains(commands[0], "gt boot triage") {
+		t.Errorf("boot fallback should include triage command, got %q", commands[0])
+	}
+	if contains(commands[0], "mail check --inject") {
+		t.Errorf("boot fallback should not inject mail on startup, got %q", commands[0])
+	}
+}
+
 func TestStartupFallbackCommands_NonAutonomousRole(t *testing.T) {
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{

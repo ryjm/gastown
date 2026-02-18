@@ -92,6 +92,15 @@ type SessionConfig struct {
 	// ReadyDelay sleeps for the runtime's configured readiness delay.
 	ReadyDelay bool
 
+	// RunStartupFallback nudges startup fallback commands for non-hook runtimes.
+	// This allows prompt-less runtimes (e.g., codex) to perform startup actions
+	// that hooks/prompt would normally trigger in Claude-based flows.
+	RunStartupFallback bool
+
+	// StartupFallbackRole overrides which role name is used for fallback command selection.
+	// Defaults to Role when empty.
+	StartupFallbackRole string
+
 	// AutoRespawn sets the auto-respawn hook so the session survives crashes.
 	AutoRespawn bool
 
@@ -125,9 +134,10 @@ type StartResult struct {
 //  7. Optional post-start: wait for agent, accept bypass, ready delay,
 //     auto-respawn, PID tracking, verify survived
 //
-// Role-specific concerns (issue validation, fallback nudges, pane-died hooks,
-// crew cycle bindings, etc.) should be handled by the caller before/after
-// calling StartSession.
+// Role-specific concerns (issue validation, pane-died hooks, crew cycle
+// bindings, etc.) should be handled by the caller before/after calling
+// StartSession. Non-hook startup fallback nudges can be enabled via
+// SessionConfig.RunStartupFallback.
 func StartSession(t *tmux.Tmux, cfg SessionConfig) (*StartResult, error) {
 	if cfg.SessionID == "" {
 		return nil, fmt.Errorf("SessionID is required")
@@ -231,7 +241,26 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (*StartResult, error) {
 		runtime.SleepForReadyDelay(runtimeConfig)
 	}
 
-	// 12. Verify session survived startup.
+	// 12. Non-hook startup fallback for prompt-less runtimes (codex, etc.).
+	if cfg.RunStartupFallback {
+		fallbackRole := cfg.StartupFallbackRole
+		if fallbackRole == "" {
+			fallbackRole = cfg.Role
+		}
+		commands := runtime.StartupFallbackCommands(fallbackRole, runtimeConfig)
+		if len(commands) > 0 {
+			// If caller did not explicitly request ready delay, still wait before nudging.
+			// Prompt-less runtimes need this for reliable startup command delivery.
+			if !cfg.ReadyDelay {
+				runtime.SleepForReadyDelay(runtimeConfig)
+			}
+			for _, command := range commands {
+				_ = t.NudgeSession(cfg.SessionID, command)
+			}
+		}
+	}
+
+	// 13. Verify session survived startup.
 	if cfg.VerifySurvived {
 		running, err := t.HasSession(cfg.SessionID)
 		if err != nil {
@@ -244,7 +273,7 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (*StartResult, error) {
 		}
 	}
 
-	// 13. Track PID for defense-in-depth orphan cleanup.
+	// 14. Track PID for defense-in-depth orphan cleanup.
 	if cfg.TrackPID && cfg.TownRoot != "" {
 		_ = TrackSessionPID(cfg.TownRoot, cfg.SessionID, t)
 	}

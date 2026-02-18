@@ -580,6 +580,15 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 
 	t := tmux.NewTmux()
 	sessionID := m.SessionName(name)
+	townRoot := filepath.Dir(m.rig.Path)
+	runtimeConfig := config.ResolveRoleAgentConfig("crew", townRoot, m.rig.Path)
+	agentName := opts.AgentOverride
+	if agentName == "" {
+		agentName = filepath.Base(runtimeConfig.Command)
+	}
+	if agentName == "" || agentName == "." {
+		agentName = "claude"
+	}
 
 	// Check if session already exists
 	running, err := t.HasSession(sessionID)
@@ -595,6 +604,8 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 			}
 		} else {
 			// Normal start - session exists, check if agent is actually running
+			// Backfill GT_AGENT for legacy sessions that predate non-Claude detection.
+			_ = t.SetEnvironment(sessionID, "GT_AGENT", agentName)
 			if t.IsAgentAlive(sessionID) {
 				return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
 			}
@@ -608,8 +619,6 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 
 	// Ensure runtime settings exist in the shared crew parent directory.
 	// Settings are passed to Claude Code via --settings flag.
-	townRoot := filepath.Dir(m.rig.Path)
-	runtimeConfig := config.ResolveRoleAgentConfig("crew", townRoot, m.rig.Path)
 	crewSettingsDir := config.RoleSettingsDir("crew", m.rig.Path)
 	if err := runtime.EnsureSettingsForRole(crewSettingsDir, worker.ClonePath, "crew", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
@@ -639,9 +648,7 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 		TownRoot:         townRoot,
 		RuntimeConfigDir: opts.ClaudeConfigDir,
 	})
-	if opts.AgentOverride != "" {
-		envVars["GT_AGENT"] = opts.AgentOverride
-	}
+	envVars["GT_AGENT"] = agentName
 
 	// Build startup command (also includes env vars via 'exec env' for
 	// WaitForCommand detection — belt and suspenders with -e flags)
@@ -674,6 +681,13 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 
 	// Track PID for defense-in-depth orphan cleanup (non-fatal)
 	_ = session.TrackSessionPID(townRoot, sessionID, t)
+
+	// Non-hook runtimes (e.g., codex) need startup fallback commands since
+	// SessionStart hooks won't run gt prime automatically.
+	if commands := runtime.StartupFallbackCommands("crew", runtimeConfig); len(commands) > 0 {
+		runtime.SleepForReadyDelay(runtimeConfig)
+		_ = runtime.RunStartupFallback(t, sessionID, "crew", runtimeConfig)
+	}
 
 	// Note: We intentionally don't wait for the agent to start here.
 	// The session is created in detached mode, and blocking for 60 seconds

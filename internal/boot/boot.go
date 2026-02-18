@@ -4,9 +4,9 @@
 package boot
 
 import (
-	"github.com/steveyegge/gastown/internal/cli"
 	"encoding/json"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/cli"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,8 +189,9 @@ func (b *Boot) spawnTmux(agentOverride string) error {
 			Sender:    "daemon",
 			Topic:     "triage",
 		},
-		Instructions:  "Run `" + cli.Name() + " boot triage` now.",
-		AgentOverride: agentOverride,
+		Instructions:       "Run `" + cli.Name() + " boot triage` now.",
+		AgentOverride:      agentOverride,
+		RunStartupFallback: true,
 	})
 	return err
 }

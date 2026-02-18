@@ -77,12 +77,13 @@ func (m *Manager) Start(agentOverride string) error {
 			Sender:    "human",
 			Topic:     "cold-start",
 		},
-		AgentOverride: agentOverride,
-		Theme:         &theme,
-		WaitForAgent:  true,
-		WaitFatal:     true,
-		AutoRespawn:   true,
-		AcceptBypass:  true,
+		AgentOverride:      agentOverride,
+		Theme:              &theme,
+		WaitForAgent:       true,
+		WaitFatal:          true,
+		RunStartupFallback: true,
+		AutoRespawn:        true,
+		AcceptBypass:       true,
 	})
 	if err != nil {
 		return err
