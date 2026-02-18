@@ -553,31 +553,31 @@ func TestGetPaneCommand_MultiPane(t *testing.T) {
 	}
 }
 
-func TestHasChildWithNames(t *testing.T) {
-	// Test the hasChildWithNames helper function directly
+func TestHasDescendantWithNames(t *testing.T) {
+	// Test the hasDescendantWithNames helper function directly
 
 	// Test with a definitely nonexistent PID
-	got := hasChildWithNames("999999999", []string{"node", "claude"})
+	got := hasDescendantWithNames("999999999", []string{"node", "claude"}, 0)
 	if got {
-		t.Error("hasChildWithNames should return false for nonexistent PID")
+		t.Error("hasDescendantWithNames should return false for nonexistent PID")
 	}
 
 	// Test with empty names slice - should always return false
-	got = hasChildWithNames("1", []string{})
+	got = hasDescendantWithNames("1", []string{}, 0)
 	if got {
-		t.Error("hasChildWithNames should return false for empty names slice")
+		t.Error("hasDescendantWithNames should return false for empty names slice")
 	}
 
 	// Test with nil names slice - should always return false
-	got = hasChildWithNames("1", nil)
+	got = hasDescendantWithNames("1", nil, 0)
 	if got {
-		t.Error("hasChildWithNames should return false for nil names slice")
+		t.Error("hasDescendantWithNames should return false for nil names slice")
 	}
 
 	// Test with PID 1 (init/launchd) - should have children but not specific agent processes
-	got = hasChildWithNames("1", []string{"node", "claude"})
+	got = hasDescendantWithNames("1", []string{"node", "claude"}, 0)
 	if got {
-		t.Logf("hasChildWithNames(\"1\", [node,claude]) = true - init has matching child?")
+		t.Logf("hasDescendantWithNames(\"1\", [node,claude]) = true - init has matching child?")
 	}
 }
 
@@ -759,82 +759,6 @@ func TestKillSessionWithProcessesExcluding_NonexistentSession(t *testing.T) {
 	_ = err
 }
 
-func TestGetSessionID(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-
-	tm := NewTmux()
-	sessionName := "gt-test-sessionid-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-
-	if err := tm.NewSessionWithCommand(sessionName, "", "sleep 300"); err != nil {
-		t.Fatalf("NewSessionWithCommand: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-
-	sid, err := tm.GetSessionID(sessionName)
-	if err != nil {
-		t.Fatalf("GetSessionID: %v", err)
-	}
-
-	// Session ID must be in "$N" format
-	if !strings.HasPrefix(sid, "$") {
-		t.Errorf("expected session ID to start with '$', got %q", sid)
-	}
-	if len(sid) < 2 {
-		t.Errorf("expected session ID like '$42', got %q", sid)
-	}
-}
-
-func TestGetSessionID_SurvivesRename(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-
-	tm := NewTmux()
-	sessionName := "gt-test-rename-" + t.Name()
-	renamedName := "gt-test-renamed-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-	_ = tm.KillSession(renamedName)
-
-	if err := tm.NewSessionWithCommand(sessionName, "", "sleep 300"); err != nil {
-		t.Fatalf("NewSessionWithCommand: %v", err)
-	}
-	defer func() {
-		_ = tm.KillSession(sessionName)
-		_ = tm.KillSession(renamedName)
-	}()
-
-	// Get session ID before rename
-	sidBefore, err := tm.GetSessionID(sessionName)
-	if err != nil {
-		t.Fatalf("GetSessionID before rename: %v", err)
-	}
-
-	// Rename the session
-	if _, err := tm.run("rename-session", "-t", sessionName, renamedName); err != nil {
-		t.Fatalf("rename-session: %v", err)
-	}
-
-	// Get session ID after rename (by new name)
-	sidAfter, err := tm.GetSessionID(renamedName)
-	if err != nil {
-		t.Fatalf("GetSessionID after rename: %v", err)
-	}
-
-	if sidBefore != sidAfter {
-		t.Errorf("session ID changed after rename: before=%q after=%q", sidBefore, sidAfter)
-	}
-
-	// Can kill by stable ID even after rename
-	if err := tm.KillSession(sidBefore); err != nil {
-		t.Errorf("KillSession by stable ID failed: %v", err)
-	}
-}
-
 func TestGetProcessGroupID(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping test: process groups not available on Windows")
@@ -996,12 +920,18 @@ func TestCleanupOrphanedSessions(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 
+	// Local predicate matching gt-/hq- prefixes (sufficient for test fixtures;
+	// avoids circular import of session package).
+	isTestGTSession := func(s string) bool {
+		return strings.HasPrefix(s, "gt-") || strings.HasPrefix(s, "hq-")
+	}
+
 	tm := NewTmux()
 
 	// Additional safety check: Skip if production GT sessions exist.
 	sessions, _ := tm.ListSessions()
 	for _, sess := range sessions {
-		if (strings.HasPrefix(sess, "gt-") || strings.HasPrefix(sess, "hq-")) &&
+		if isTestGTSession(sess) &&
 			sess != "gt-test-cleanup-rig" && sess != "hq-test-cleanup" {
 			t.Skip("Skipping: production GT sessions exist (would be killed by CleanupOrphanedSessions)")
 		}
@@ -1046,7 +976,7 @@ func TestCleanupOrphanedSessions(t *testing.T) {
 	}
 
 	// Run cleanup
-	cleaned, err := tm.CleanupOrphanedSessions()
+	cleaned, err := tm.CleanupOrphanedSessions(isTestGTSession)
 	if err != nil {
 		t.Fatalf("CleanupOrphanedSessions: %v", err)
 	}
@@ -1088,18 +1018,23 @@ func TestCleanupOrphanedSessions_NoSessions(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 
+	// Local predicate matching gt-/hq- prefixes (avoids circular import).
+	isTestGTSession := func(s string) bool {
+		return strings.HasPrefix(s, "gt-") || strings.HasPrefix(s, "hq-")
+	}
+
 	tm := NewTmux()
 
 	// Additional safety check: Skip if production GT sessions exist.
 	sessions, _ := tm.ListSessions()
 	for _, sess := range sessions {
-		if strings.HasPrefix(sess, "gt-") || strings.HasPrefix(sess, "hq-") {
+		if isTestGTSession(sess) {
 			t.Skip("Skipping: GT sessions exist (CleanupOrphanedSessions would kill them)")
 		}
 	}
 
 	// Running cleanup with no orphaned GT sessions should return 0, no error
-	cleaned, err := tm.CleanupOrphanedSessions()
+	cleaned, err := tm.CleanupOrphanedSessions(isTestGTSession)
 	if err != nil {
 		t.Fatalf("CleanupOrphanedSessions: %v", err)
 	}
@@ -2023,5 +1958,45 @@ func TestNewSessionSet_Nil(t *testing.T) {
 
 	if set.Has("anything") {
 		t.Error("Nil-input SessionSet.Has() = true, want false")
+	}
+}
+
+func TestSessionPrefixPattern_AlwaysIncludesGTAndHQ(t *testing.T) {
+	// Even without GT_ROOT, the pattern should include gt and hq as safe defaults.
+	orig := os.Getenv("GT_ROOT")
+	t.Setenv("GT_ROOT", "")
+	defer func() { os.Setenv("GT_ROOT", orig) }()
+
+	pattern := sessionPrefixPattern()
+	if !strings.Contains(pattern, "gt") {
+		t.Errorf("pattern %q missing 'gt'", pattern)
+	}
+	if !strings.Contains(pattern, "hq") {
+		t.Errorf("pattern %q missing 'hq'", pattern)
+	}
+	// Must be a valid grep -Eq anchored alternation
+	if !strings.HasPrefix(pattern, "^(") || !strings.HasSuffix(pattern, ")-") {
+		t.Errorf("pattern %q has unexpected format", pattern)
+	}
+}
+
+func TestSessionPrefixPattern_WithTownRoot(t *testing.T) {
+	// Point at the real town root if available; otherwise skip.
+	townRoot := os.Getenv("GT_ROOT")
+	if townRoot == "" {
+		t.Skip("GT_ROOT not set; skipping live rigs.json test")
+	}
+	pattern := sessionPrefixPattern()
+	// With a real rigs.json, pattern must include at least gt, hq, and
+	// whatever other rigs are registered.
+	if !strings.Contains(pattern, "gt") {
+		t.Errorf("pattern %q missing 'gt'", pattern)
+	}
+	if !strings.Contains(pattern, "hq") {
+		t.Errorf("pattern %q missing 'hq'", pattern)
+	}
+	// Verify it's a sorted alternation.
+	if !strings.HasPrefix(pattern, "^(") || !strings.HasSuffix(pattern, ")-") {
+		t.Errorf("pattern %q has unexpected format", pattern)
 	}
 }

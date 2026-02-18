@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -137,8 +138,6 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 
 	// Ensure runtime settings exist in the shared refinery parent directory.
 	// Settings are passed to Claude Code via --settings flag.
-	accountsPath := constants.MayorAccountsPath(townRoot)
-	claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
 	refinerySettingsDir := config.RoleSettingsDir("refinery", m.rig.Path)
 	if err := runtime.EnsureSettingsForRole(refinerySettingsDir, refineryRigDir, "refinery", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
@@ -146,7 +145,7 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 
 	// Ensure .gitignore has required Gas Town patterns
 	if err := rig.EnsureGitignorePatterns(refineryRigDir); err != nil {
-		fmt.Printf("Warning: could not update refinery .gitignore: %v\n", err)
+		style.PrintWarning("could not update refinery .gitignore: %v", err)
 	}
 
 	initialPrompt := session.BuildStartupPrompt(session.BeaconConfig{
@@ -155,21 +154,15 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		Topic:     "patrol",
 	}, "Run `gt prime --hook` and begin patrol.")
 
-	startEnvVars := config.AgentEnv(config.AgentEnvConfig{
-		Role:             "refinery",
-		Rig:              m.rig.Name,
-		TownRoot:         townRoot,
-		RuntimeConfigDir: claudeConfigDir,
-	})
 	var command string
 	if agentOverride != "" {
 		var err error
-		command, err = config.BuildStartupCommandWithAgentOverride(startEnvVars, m.rig.Path, initialPrompt, agentOverride)
+		command, err = config.BuildAgentStartupCommandWithAgentOverride("refinery", m.rig.Name, townRoot, m.rig.Path, initialPrompt, agentOverride)
 		if err != nil {
 			return fmt.Errorf("building startup command with agent override: %w", err)
 		}
 	} else {
-		command = config.BuildStartupCommand(startEnvVars, m.rig.Path, initialPrompt)
+		command = config.BuildAgentStartupCommand("refinery", m.rig.Name, townRoot, m.rig.Path, initialPrompt)
 	}
 
 	// Create session with command directly to avoid send-keys race condition.
@@ -181,10 +174,9 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	// Set environment variables (non-fatal: session works without these)
 	// Use centralized AgentEnv for consistency across all role startup paths
 	envVars := config.AgentEnv(config.AgentEnvConfig{
-		Role:             "refinery",
-		Rig:              m.rig.Name,
-		TownRoot:         townRoot,
-		RuntimeConfigDir: claudeConfigDir,
+		Role:     "refinery",
+		Rig:      m.rig.Name,
+		TownRoot: townRoot,
 	})
 
 	// Add refinery-specific flag

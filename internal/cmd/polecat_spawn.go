@@ -2,8 +2,8 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -30,7 +30,6 @@ type SpawnedPolecatInfo struct {
 	Pane        string // Tmux pane ID (empty until StartSession is called)
 	DoltBranch  string // Dolt branch for write isolation (empty if not created)
 	BaseBranch  string // Effective base branch (e.g., "main", "integration/epic-id")
-	Reused      bool   // True if an existing session was reused instead of freshly spawned
 
 	// Internal fields for deferred session start
 	account string
@@ -276,30 +275,8 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 			return "", err
 		}
 		startOpts.Command = cmd
-		startOpts.Agent = s.agent
 	}
 	if err := polecatSessMgr.Start(s.PolecatName, startOpts); err != nil {
-		if errors.Is(err, polecat.ErrSessionReused) {
-			// Session reused — agent is already running. Update state for
-			// monitoring visibility, then return the pane. Callers must check
-			// s.Reused to know a nudge is needed (the session didn't get a
-			// StartupNudge from Start()).
-			pane, paneErr := getSessionPane(s.SessionName)
-			if paneErr != nil {
-				return "", fmt.Errorf("getting pane for reused session %s: %w", s.SessionName, paneErr)
-			}
-			polecatGit := git.NewGit(r.Path)
-			polecatMgr := polecat.NewManager(r, polecatGit, t)
-			if stateErr := polecatMgr.SetAgentStateWithRetry(s.PolecatName, "working"); stateErr != nil {
-				fmt.Printf("Warning: could not update agent state for reused session: %v\n", stateErr)
-			}
-			if stateErr := polecatMgr.SetState(s.PolecatName, polecat.StateWorking); stateErr != nil {
-				fmt.Printf("Warning: could not update issue status for reused session: %v\n", stateErr)
-			}
-			s.Reused = true
-			s.Pane = pane
-			return pane, nil
-		}
 		return "", fmt.Errorf("starting session: %w", err)
 	}
 
@@ -307,7 +284,7 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	spawnTownRoot := filepath.Dir(r.Path)
 	runtimeConfig := config.ResolveRoleAgentConfig("polecat", spawnTownRoot, r.Path)
 	if err := t.WaitForRuntimeReady(s.SessionName, runtimeConfig, 30*time.Second); err != nil {
-		fmt.Printf("Warning: runtime may not be fully ready: %v\n", err)
+		style.PrintWarning("runtime may not be fully ready: %v", err)
 	}
 
 	// Update agent state with retry logic (gt-94llt7: fail-safe Dolt writes).
@@ -319,13 +296,13 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	polecatGit := git.NewGit(r.Path)
 	polecatMgr := polecat.NewManager(r, polecatGit, t)
 	if err := polecatMgr.SetAgentStateWithRetry(s.PolecatName, "working"); err != nil {
-		fmt.Printf("Warning: could not update agent state after retries: %v\n", err)
+		style.PrintWarning("could not update agent state after retries: %v", err)
 	}
 
 	// Update issue status from hooked to in_progress.
 	// Also warn-only for the same reason: session is already running.
 	if err := polecatMgr.SetState(s.PolecatName, polecat.StateWorking); err != nil {
-		fmt.Printf("Warning: could not update issue status to in_progress: %v\n", err)
+		style.PrintWarning("could not update issue status to in_progress: %v", err)
 	}
 
 	// Get pane — if this fails, the session may have died during startup.
@@ -407,10 +384,32 @@ func IsRigName(target string) (string, bool) {
 
 // verifyWorktreeExists checks that a git worktree was actually created at the given path.
 // Returns an error if the worktree is missing or invalid.
-// Delegates to polecat.HasValidWorktree for the actual filesystem check.
 func verifyWorktreeExists(clonePath string) error {
-	if !polecat.HasValidWorktree(clonePath) {
-		return fmt.Errorf("worktree missing or invalid (no .git): %s", clonePath)
+	// Check if directory exists
+	info, err := os.Stat(clonePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("worktree directory does not exist: %s", clonePath)
+		}
+		return fmt.Errorf("checking worktree directory: %w", err)
 	}
+	if !info.IsDir() {
+		return fmt.Errorf("worktree path is not a directory: %s", clonePath)
+	}
+
+	// Check for .git file (worktrees have a .git file, not a .git directory)
+	gitPath := filepath.Join(clonePath, ".git")
+	gitInfo, err := os.Stat(gitPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("worktree missing .git file (not a valid git worktree): %s", clonePath)
+		}
+		return fmt.Errorf("checking .git: %w", err)
+	}
+
+	// .git should be a file for worktrees (contains "gitdir: ..." pointer)
+	// or a directory for regular clones - either is valid
+	_ = gitInfo // Both file and directory are acceptable
+
 	return nil
 }

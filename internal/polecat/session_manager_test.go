@@ -1,8 +1,6 @@
 package polecat
 
 import (
-	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -250,6 +248,8 @@ func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
 	polecatName := "Toast"
 	workDir := "/tmp/fake-worktree"
 
+	townRoot := "/tmp/fake-town"
+
 	// The env vars that should be injected via PrependEnv
 	requiredEnvVars := []string{
 		"GT_BRANCH",       // Git branch for nuked-worktree fallback
@@ -257,6 +257,7 @@ func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
 		"GT_RIG",          // Rig name (was already there pre-PR)
 		"GT_POLECAT",      // Polecat name (was already there pre-PR)
 		"GT_ROLE",         // Role address (was already there pre-PR)
+		"GT_TOWN_ROOT",    // Town root for FindFromCwdWithFallback after worktree nuke
 	}
 
 	// Verify the env var map includes all required keys
@@ -265,6 +266,7 @@ func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
 		"GT_POLECAT":      polecatName,
 		"GT_ROLE":         rigName + "/polecats/" + polecatName,
 		"GT_POLECAT_PATH": workDir,
+		"GT_TOWN_ROOT":    townRoot,
 	}
 
 	// GT_BRANCH is conditionally added (only if CurrentBranch succeeds)
@@ -421,127 +423,4 @@ func TestValidateSessionName(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestHasValidWorktree(t *testing.T) {
-	root := t.TempDir()
-
-	tests := []struct {
-		name  string
-		setup func(dir string)
-		want  bool
-	}{
-		{
-			name:  "missing directory → false",
-			setup: func(dir string) {},
-			want:  false,
-		},
-		{
-			name: "directory exists but no .git → false",
-			setup: func(dir string) {
-				_ = os.MkdirAll(dir, 0755)
-			},
-			want: false,
-		},
-		{
-			name: "directory with .git file (worktree) → true",
-			setup: func(dir string) {
-				_ = os.MkdirAll(dir, 0755)
-				_ = os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: ../../.git/worktrees/foo"), 0644)
-			},
-			want: true,
-		},
-		{
-			name: "directory with .git directory (regular clone) → true",
-			setup: func(dir string) {
-				_ = os.MkdirAll(filepath.Join(dir, ".git"), 0755)
-			},
-			want: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := filepath.Join(root, "test-worktree-"+tc.name)
-			tc.setup(dir)
-			got := HasValidWorktree(dir)
-			if got != tc.want {
-				t.Errorf("hasValidWorktree(%q) = %v, want %v", dir, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestWorktreeStateClassification verifies the filesystem-level worktree
-// validation used by Start()'s session state classification. The tmux-dependent
-// paths (IsAgentAlive, GetPaneID, KillSessionWithProcesses) require a live
-// session and are not covered here.
-func TestWorktreeStateClassification(t *testing.T) {
-	root := t.TempDir()
-	r := &rig.Rig{Name: "gastown", Path: root}
-	m := NewSessionManager(tmux.NewTmux(), r)
-
-	// State: stale — worktree has no .git
-	t.Run("stale: no .git in worktree", func(t *testing.T) {
-		dir := filepath.Join(root, "stale-wt")
-		_ = os.MkdirAll(dir, 0755)
-		if HasValidWorktree(dir) {
-			t.Error("stale session should not have valid worktree (no .git)")
-		}
-	})
-
-	// State: zombie — directory doesn't exist
-	t.Run("zombie: worktree directory missing", func(t *testing.T) {
-		dir := filepath.Join(root, "nonexistent-wt")
-		if HasValidWorktree(dir) {
-			t.Error("zombie session should not have valid worktree (missing dir)")
-		}
-	})
-
-	// State: reusable — worktree with .git file
-	t.Run("reusable: valid worktree", func(t *testing.T) {
-		dir := filepath.Join(root, "valid-wt")
-		_ = os.MkdirAll(dir, 0755)
-		_ = os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: ../../../.git/worktrees/foo"), 0644)
-		if !HasValidWorktree(dir) {
-			t.Error("reusable session should have valid worktree")
-		}
-	})
-
-	// State: reusable with opts.WorkDir — custom path respected
-	t.Run("reusable: opts.WorkDir overrides clonePath", func(t *testing.T) {
-		customDir := filepath.Join(root, "custom-workdir")
-		_ = os.MkdirAll(customDir, 0755)
-		_ = os.WriteFile(filepath.Join(customDir, ".git"), []byte("gitdir: ../../.git/worktrees/custom"), 0644)
-		// hasValidWorktree should use customDir, not m.clonePath("somepolecat")
-		if !HasValidWorktree(customDir) {
-			t.Error("custom WorkDir with .git should be recognized as valid worktree")
-		}
-		// Verify clonePath for the same polecat is different (sanity check)
-		cloned := m.clonePath("somepolecat")
-		if cloned == customDir {
-			t.Error("test assumption violated: clonePath should differ from customDir")
-		}
-	})
-
-	// ErrSessionReused is exported and distinguishable from nil
-	t.Run("ErrSessionReused is non-nil and distinct", func(t *testing.T) {
-		if ErrSessionReused == nil {
-			t.Error("ErrSessionReused must be non-nil")
-		}
-		if ErrSessionReused == ErrSessionRunning {
-			t.Error("ErrSessionReused must differ from ErrSessionRunning")
-		}
-	})
-
-	// ErrSessionReused works with errors.Is (callers must use errors.Is)
-	t.Run("ErrSessionReused works with errors.Is", func(t *testing.T) {
-		if !errors.Is(ErrSessionReused, ErrSessionReused) {
-			t.Error("errors.Is(ErrSessionReused, ErrSessionReused) must be true")
-		}
-		wrapped := fmt.Errorf("context: %w", ErrSessionReused)
-		if !errors.Is(wrapped, ErrSessionReused) {
-			t.Error("errors.Is must match wrapped ErrSessionReused")
-		}
-	})
 }

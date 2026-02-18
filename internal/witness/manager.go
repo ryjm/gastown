@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -137,8 +138,6 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	// ResolveRoleAgentConfig is internally serialized (resolveConfigMu in
 	// package config) to prevent concurrent rig starts from corrupting the
 	// global agent registry.
-	accountsPath := constants.MayorAccountsPath(townRoot)
-	claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
 	witnessSettingsDir := config.RoleSettingsDir("witness", m.rig.Path)
 	if err := runtime.EnsureSettingsForRole(witnessSettingsDir, witnessDir, "witness", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
@@ -146,7 +145,7 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 
 	// Ensure .gitignore has required Gas Town patterns
 	if err := rig.EnsureGitignorePatterns(witnessDir); err != nil {
-		fmt.Printf("Warning: could not update witness .gitignore: %v\n", err)
+		style.PrintWarning("could not update witness .gitignore: %v", err)
 	}
 
 	roleConfig, err := m.roleConfig()
@@ -157,7 +156,7 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	// Build startup command first
 	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
 	// Pass m.rig.Path so rig agent settings are honored (not town-level defaults)
-	command, err := buildWitnessStartCommand(m.rig.Path, m.rig.Name, townRoot, agentOverride, claudeConfigDir, roleConfig)
+	command, err := buildWitnessStartCommand(m.rig.Path, m.rig.Name, townRoot, agentOverride, roleConfig)
 	if err != nil {
 		return err
 	}
@@ -171,10 +170,9 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	// Set environment variables (non-fatal: session works without these)
 	// Use centralized AgentEnv for consistency across all role startup paths
 	envVars := config.AgentEnv(config.AgentEnvConfig{
-		Role:             "witness",
-		Rig:              m.rig.Name,
-		TownRoot:         townRoot,
-		RuntimeConfigDir: claudeConfigDir,
+		Role:     "witness",
+		Rig:      m.rig.Name,
+		TownRoot: townRoot,
 	})
 	envVars["GT_AGENT"] = agentName
 	for k, v := range envVars {
@@ -252,7 +250,7 @@ func roleConfigEnvVars(roleConfig *beads.RoleConfig, townRoot, rigName string) m
 	return expanded
 }
 
-func buildWitnessStartCommand(rigPath, rigName, townRoot, agentOverride, claudeConfigDir string, roleConfig *beads.RoleConfig) (string, error) {
+func buildWitnessStartCommand(rigPath, rigName, townRoot, agentOverride string, roleConfig *beads.RoleConfig) (string, error) {
 	if agentOverride != "" {
 		roleConfig = nil
 	}
@@ -264,16 +262,11 @@ func buildWitnessStartCommand(rigPath, rigName, townRoot, agentOverride, claudeC
 		Sender:    "deacon",
 		Topic:     "patrol",
 	}, "Run `gt prime --hook` and begin patrol.")
-	envVars := config.AgentEnv(config.AgentEnvConfig{
-		Role:             "witness",
-		Rig:              rigName,
-		TownRoot:         townRoot,
-		RuntimeConfigDir: claudeConfigDir,
-	})
-	if agentOverride != "" {
-		return config.BuildStartupCommandWithAgentOverride(envVars, rigPath, initialPrompt, agentOverride)
+	command, err := config.BuildAgentStartupCommandWithAgentOverride("witness", rigName, townRoot, rigPath, initialPrompt, agentOverride)
+	if err != nil {
+		return "", fmt.Errorf("building startup command: %w", err)
 	}
-	return config.BuildStartupCommand(envVars, rigPath, initialPrompt), nil
+	return command, nil
 }
 
 // Stop stops the witness.
