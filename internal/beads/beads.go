@@ -268,7 +268,7 @@ func (b *Beads) run(args ...string) ([]byte, error) {
 	// bd may exit 0 but write error to stderr with empty stdout.
 	// Detect this case and treat as error to avoid JSON parse failures.
 	if stdout.Len() == 0 && stderr.Len() > 0 {
-		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), "", args)
+		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args)
 	}
 
 	return stdout.Bytes(), nil

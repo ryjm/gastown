@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -126,6 +127,13 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	if runtimeConfig == nil {
 		runtimeConfig = config.DefaultRuntimeConfig()
 	}
+	agentName := crewAgentOverride
+	if agentName == "" {
+		agentName = filepath.Base(runtimeConfig.Command)
+	}
+	if agentName == "" || agentName == "." {
+		agentName = "claude"
+	}
 	crewSettingsDir := config.RoleSettingsDir("crew", r.Path)
 	if err := runtime.EnsureSettingsForRole(crewSettingsDir, worker.ClonePath, "crew", runtimeConfig); err != nil {
 		// Non-fatal but log warning - missing settings can cause agents to start without hooks
@@ -144,6 +152,10 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	}
 	if debug {
 		fmt.Printf("[DEBUG] hasSession=%v\n", hasSession)
+	}
+	if hasSession {
+		// Backfill GT_AGENT for legacy sessions that predate non-Claude detection.
+		_ = t.SetEnvironment(sessionID, "GT_AGENT", agentName)
 	}
 
 	// Before creating a new session, check if there's already a runtime session
@@ -192,6 +204,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 			TownRoot:         townRoot,
 			RuntimeConfigDir: claudeConfigDir,
 		})
+		envVars["GT_AGENT"] = agentName
 		for k, v := range envVars {
 			_ = t.SetEnvironment(sessionID, k, v)
 		}

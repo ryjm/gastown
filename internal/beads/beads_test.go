@@ -130,7 +130,7 @@ func TestWrapError(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		err := b.wrapError(nil, tt.stderr, "", []string{"test"})
+		err := b.wrapError(nil, tt.stderr, []string{"test"})
 		if tt.wantNil {
 			if err != nil {
 				t.Errorf("wrapError(%q) = %v, want nil", tt.stderr, err)
@@ -2851,20 +2851,20 @@ func TestCloseAndClearAgentBead_ReasonVariations(t *testing.T) {
 // beads by checking both the gt:agent label (preferred) and the legacy type field.
 func TestIsAgentBead(t *testing.T) {
 	tests := []struct {
-		name   string
-		issue  *Issue
-		want   bool
+		name  string
+		issue *Issue
+		want  bool
 	}{
 		{
-			name: "nil issue",
+			name:  "nil issue",
 			issue: nil,
-			want: false,
+			want:  false,
 		},
 		{
 			name: "agent with legacy type",
 			issue: &Issue{
-				ID:   "gt-gastown-polecat-toast",
-				Type: "agent",
+				ID:     "gt-gastown-polecat-toast",
+				Type:   "agent",
 				Labels: []string{},
 			},
 			want: true,
@@ -2872,8 +2872,8 @@ func TestIsAgentBead(t *testing.T) {
 		{
 			name: "agent with gt:agent label",
 			issue: &Issue{
-				ID:   "gt-gastown-polecat-toast",
-				Type: "task",
+				ID:     "gt-gastown-polecat-toast",
+				Type:   "task",
 				Labels: []string{"gt:agent"},
 			},
 			want: true,
@@ -2881,8 +2881,8 @@ func TestIsAgentBead(t *testing.T) {
 		{
 			name: "agent with both type and label",
 			issue: &Issue{
-				ID:   "gt-gastown-polecat-toast",
-				Type: "agent",
+				ID:     "gt-gastown-polecat-toast",
+				Type:   "agent",
 				Labels: []string{"gt:agent", "other-label"},
 			},
 			want: true,
@@ -2890,8 +2890,8 @@ func TestIsAgentBead(t *testing.T) {
 		{
 			name: "not an agent - task type without label",
 			issue: &Issue{
-				ID:   "gt-abc123",
-				Type: "task",
+				ID:     "gt-abc123",
+				Type:   "task",
 				Labels: []string{},
 			},
 			want: false,
@@ -2899,8 +2899,8 @@ func TestIsAgentBead(t *testing.T) {
 		{
 			name: "not an agent - bug type with other labels",
 			issue: &Issue{
-				ID:   "gt-xyz456",
-				Type: "bug",
+				ID:     "gt-xyz456",
+				Type:   "bug",
 				Labels: []string{"priority-high", "blocked"},
 			},
 			want: false,
@@ -2908,8 +2908,8 @@ func TestIsAgentBead(t *testing.T) {
 		{
 			name: "agent with gt:agent label and other labels",
 			issue: &Issue{
-				ID:   "gt-gastown-witness",
-				Type: "task",
+				ID:     "gt-gastown-witness",
+				Type:   "task",
 				Labels: []string{"priority-high", "gt:agent", "status-running"},
 			},
 			want: true,

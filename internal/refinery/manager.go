@@ -93,9 +93,24 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		return fmt.Errorf("foreground mode is deprecated; use background mode (remove --foreground flag)")
 	}
 
+	// Resolve runtime config early so liveness checks can use the correct
+	// agent process names for non-Claude runtimes (e.g., codex, gemini).
+	townRoot := filepath.Dir(m.rig.Path)
+	runtimeConfig := config.ResolveRoleAgentConfig("refinery", townRoot, m.rig.Path)
+	agentName := agentOverride
+	if agentName == "" {
+		agentName = filepath.Base(runtimeConfig.Command)
+	}
+	if agentName == "" || agentName == "." {
+		agentName = "claude"
+	}
+
 	// Check if session already exists
 	running, _ := t.HasSession(sessionID)
 	if running {
+		// Backfill GT_AGENT for legacy sessions that predate non-Claude detection.
+		_ = t.SetEnvironment(sessionID, "GT_AGENT", agentName)
+
 		// Session exists - check if agent is actually running (healthy vs zombie)
 		if t.IsAgentAlive(sessionID) {
 			return ErrAlreadyRunning
@@ -122,11 +137,8 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 
 	// Ensure runtime settings exist in the shared refinery parent directory.
 	// Settings are passed to Claude Code via --settings flag.
-	townRoot := filepath.Dir(m.rig.Path)
 	accountsPath := constants.MayorAccountsPath(townRoot)
 	claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
-
-	runtimeConfig := config.ResolveRoleAgentConfig("refinery", townRoot, m.rig.Path)
 	refinerySettingsDir := config.RoleSettingsDir("refinery", m.rig.Path)
 	if err := runtime.EnsureSettingsForRole(refinerySettingsDir, refineryRigDir, "refinery", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
@@ -177,6 +189,7 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 
 	// Add refinery-specific flag
 	envVars["GT_REFINERY"] = "1"
+	envVars["GT_AGENT"] = agentName
 
 	// Set all env vars in tmux session (for debugging) and they'll also be exported to Claude
 	for k, v := range envVars {

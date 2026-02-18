@@ -11,9 +11,9 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -98,12 +98,27 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		return fmt.Errorf("foreground mode is deprecated; use background mode (remove --foreground flag)")
 	}
 
+	// Resolve runtime config early so liveness checks can use the correct
+	// agent process names for non-Claude runtimes (e.g., codex, gemini).
+	townRoot := m.townRoot()
+	runtimeConfig := config.ResolveRoleAgentConfig("witness", townRoot, m.rig.Path)
+	agentName := agentOverride
+	if agentName == "" {
+		agentName = filepath.Base(runtimeConfig.Command)
+	}
+	if agentName == "" || agentName == "." {
+		agentName = "claude"
+	}
+
 	// Check if session already exists
 	running, _ := t.HasSession(sessionID)
 	if running {
-		// Session exists - check if Claude is actually running (healthy vs zombie)
+		// Backfill GT_AGENT for legacy sessions that predate non-Claude detection.
+		_ = t.SetEnvironment(sessionID, "GT_AGENT", agentName)
+
+		// Session exists - check if runtime is actually running (healthy vs zombie)
 		if t.IsAgentAlive(sessionID) {
-			// Healthy - Claude is running
+			// Healthy - runtime is running
 			return ErrAlreadyRunning
 		}
 		// Zombie - tmux alive but Claude dead. Kill and recreate.
@@ -122,11 +137,8 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	// ResolveRoleAgentConfig is internally serialized (resolveConfigMu in
 	// package config) to prevent concurrent rig starts from corrupting the
 	// global agent registry.
-	townRoot := m.townRoot()
 	accountsPath := constants.MayorAccountsPath(townRoot)
 	claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
-
-	runtimeConfig := config.ResolveRoleAgentConfig("witness", townRoot, m.rig.Path)
 	witnessSettingsDir := config.RoleSettingsDir("witness", m.rig.Path)
 	if err := runtime.EnsureSettingsForRole(witnessSettingsDir, witnessDir, "witness", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
@@ -143,7 +155,6 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	}
 
 	// Build startup command first
-	// NOTE: No gt prime injection needed - SessionStart hook handles it automatically
 	// Export GT_ROLE and BD_ACTOR in the command since tmux SetEnvironment only affects new panes
 	// Pass m.rig.Path so rig agent settings are honored (not town-level defaults)
 	command, err := buildWitnessStartCommand(m.rig.Path, m.rig.Name, townRoot, agentOverride, claudeConfigDir, roleConfig)
@@ -165,6 +176,7 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		TownRoot:         townRoot,
 		RuntimeConfigDir: claudeConfigDir,
 	})
+	envVars["GT_AGENT"] = agentName
 	for k, v := range envVars {
 		_ = t.SetEnvironment(sessionID, k, v)
 	}
@@ -199,6 +211,11 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	if err := session.TrackSessionPID(townRoot, sessionID, t); err != nil {
 		log.Printf("warning: tracking session PID for %s: %v", sessionID, err)
 	}
+
+	// Non-hook runtimes (e.g., codex) need startup fallback commands since
+	// SessionStart hooks won't run gt prime automatically.
+	runtime.SleepForReadyDelay(runtimeConfig)
+	_ = runtime.RunStartupFallback(t, sessionID, "witness", runtimeConfig)
 
 	time.Sleep(constants.ShutdownNotifyDelay)
 

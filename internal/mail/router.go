@@ -1504,6 +1504,38 @@ func summarizeLegacyMailbox(mailbox *Mailbox) (unread int, first string) {
 	return len(messages), messages[0].Subject
 }
 
+// listAllBeadsMessages loads all gt:message beads from the given database.
+// Caller is responsible for recipient filtering.
+func listAllBeadsMessages(workDir, beadsDir string) ([]BeadsMessage, error) {
+	if err := beads.EnsureCustomTypes(beadsDir); err != nil {
+		return nil, fmt.Errorf("ensuring custom types: %w", err)
+	}
+
+	args := []string{
+		"list",
+		"--label", "gt:message",
+		"--json",
+		"--limit", "0",
+	}
+
+	ctx, cancel := bdReadCtx()
+	defer cancel()
+	stdout, err := runBdCommand(ctx, args, workDir, beadsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var messages []BeadsMessage
+	if err := json.Unmarshal(stdout, &messages); err != nil {
+		if len(stdout) == 0 || string(stdout) == "null" {
+			return make([]BeadsMessage, 0), nil
+		}
+		return nil, err
+	}
+
+	return messages, nil
+}
+
 // notifyRecipient sends a notification to a recipient's tmux session.
 //
 // Notification strategy (idle-aware):

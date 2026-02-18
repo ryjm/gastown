@@ -72,10 +72,25 @@ func (m *Manager) deaconDir() string {
 func (m *Manager) Start(agentOverride string) error {
 	t := m.tmux
 	sessionID := m.SessionName()
+	deaconDir := m.deaconDir()
+
+	// Resolve runtime config early so liveness checks can use the correct
+	// agent process names for non-Claude runtimes (e.g., codex, gemini).
+	runtimeConfig := config.ResolveRoleAgentConfig("deacon", m.townRoot, deaconDir)
+	agentName := agentOverride
+	if agentName == "" {
+		agentName = filepath.Base(runtimeConfig.Command)
+	}
+	if agentName == "" || agentName == "." {
+		agentName = "claude"
+	}
 
 	// Check if session already exists
 	running, _ := t.HasSession(sessionID)
 	if running {
+		// Backfill GT_AGENT for legacy sessions that predate non-Claude detection.
+		_ = t.SetEnvironment(sessionID, "GT_AGENT", agentName)
+
 		// Session exists - check if agent is actually running (healthy vs zombie)
 		if t.IsAgentAlive(sessionID) {
 			return ErrAlreadyRunning
@@ -88,13 +103,11 @@ func (m *Manager) Start(agentOverride string) error {
 	}
 
 	// Ensure deacon directory exists
-	deaconDir := m.deaconDir()
 	if err := os.MkdirAll(deaconDir, 0755); err != nil {
 		return fmt.Errorf("creating deacon directory: %w", err)
 	}
 
 	// Ensure runtime settings exist in deaconDir where session runs.
-	runtimeConfig := config.ResolveRoleAgentConfig("deacon", m.townRoot, deaconDir)
 	if err := runtime.EnsureSettingsForRole(deaconDir, deaconDir, "deacon", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
@@ -126,6 +139,7 @@ func (m *Manager) Start(agentOverride string) error {
 		Role:     "deacon",
 		TownRoot: m.townRoot,
 	})
+	envVars["GT_AGENT"] = agentName
 	for k, v := range envVars {
 		_ = t.SetEnvironment(sessionID, k, v)
 	}
@@ -158,6 +172,13 @@ func (m *Manager) Start(agentOverride string) error {
 
 	// Accept bypass permissions warning dialog if it appears.
 	_ = t.AcceptBypassPermissionsWarning(sessionID)
+
+	// Non-hook runtimes (e.g., codex) need startup fallback commands since
+	// SessionStart hooks won't run gt prime automatically.
+	if realTmux, ok := t.(*tmux.Tmux); ok {
+		runtime.SleepForReadyDelay(runtimeConfig)
+		_ = runtime.RunStartupFallback(realTmux, sessionID, "deacon", runtimeConfig)
+	}
 
 	time.Sleep(constants.ShutdownNotifyDelay)
 
