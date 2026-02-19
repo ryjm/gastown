@@ -1,12 +1,18 @@
 package daemon
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // testDaemon creates a minimal Daemon for testing.
@@ -431,5 +437,144 @@ func TestSyncWorkspace_DirtyTreeAutoStash(t *testing.T) {
 	// No sync failures should have been recorded (pull succeeded)
 	if got := d.getSyncFailures(workDir); got != 0 {
 		t.Errorf("expected 0 sync failures after successful sync, got %d", got)
+	}
+}
+
+func TestApplyStartupBootstrap_NonHookRuntimeNudgesFallbackCommand(t *testing.T) {
+	townRoot := t.TempDir()
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+	}
+	parsed := &ParsedIdentity{RoleType: "polecat", RigName: "gastown", AgentName: "cheedo"}
+
+	origResolve := resolveRoleAgentConfigFn
+	origDelay := startupReadyDelayFn
+	origNudge := nudgeSessionFn
+	t.Cleanup(func() {
+		resolveRoleAgentConfigFn = origResolve
+		startupReadyDelayFn = origDelay
+		nudgeSessionFn = origNudge
+	})
+
+	resolveRoleAgentConfigFn = func(role, resolvedTownRoot, rigPath string) *config.RuntimeConfig {
+		if role != "polecat" {
+			t.Fatalf("resolveRoleAgentConfigFn role = %q, want polecat", role)
+		}
+		if resolvedTownRoot != townRoot {
+			t.Fatalf("resolveRoleAgentConfigFn townRoot = %q, want %q", resolvedTownRoot, townRoot)
+		}
+		wantRigPath := filepath.Join(townRoot, "gastown")
+		if rigPath != wantRigPath {
+			t.Fatalf("resolveRoleAgentConfigFn rigPath = %q, want %q", rigPath, wantRigPath)
+		}
+		return &config.RuntimeConfig{
+			Hooks: &config.RuntimeHooksConfig{Provider: "none"},
+			Tmux:  &config.RuntimeTmuxConfig{ReadyDelayMs: 1},
+		}
+	}
+
+	delayCalls := 0
+	startupReadyDelayFn = func(_ *config.RuntimeConfig) {
+		delayCalls++
+	}
+
+	var nudges []string
+	nudgeSessionFn = func(_ *tmux.Tmux, gotSessionName, command string) error {
+		if gotSessionName != "gt-gastown-cheedo" {
+			t.Fatalf("sessionName = %q, want %q", gotSessionName, "gt-gastown-cheedo")
+		}
+		nudges = append(nudges, command)
+		return nil
+	}
+
+	d.applyStartupBootstrap("gt-gastown-cheedo", "gastown-polecat-cheedo", parsed)
+
+	if delayCalls != 1 {
+		t.Fatalf("startupReadyDelayFn calls = %d, want 1", delayCalls)
+	}
+	if len(nudges) != 1 {
+		t.Fatalf("nudge count = %d, want 1", len(nudges))
+	}
+	if nudges[0] != "gt prime && gt mail check --inject" {
+		t.Fatalf("unexpected fallback command: %q", nudges[0])
+	}
+}
+
+func TestApplyStartupBootstrap_WithHooksSkipsFallback(t *testing.T) {
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(io.Discard, "", 0),
+	}
+	parsed := &ParsedIdentity{RoleType: "polecat", RigName: "gastown", AgentName: "cheedo"}
+
+	origResolve := resolveRoleAgentConfigFn
+	origDelay := startupReadyDelayFn
+	origNudge := nudgeSessionFn
+	t.Cleanup(func() {
+		resolveRoleAgentConfigFn = origResolve
+		startupReadyDelayFn = origDelay
+		nudgeSessionFn = origNudge
+	})
+
+	resolveRoleAgentConfigFn = func(_, _, _ string) *config.RuntimeConfig {
+		return &config.RuntimeConfig{
+			Hooks: &config.RuntimeHooksConfig{Provider: "claude"},
+		}
+	}
+	startupReadyDelayFn = func(_ *config.RuntimeConfig) {
+		t.Fatal("startupReadyDelayFn should not be called when fallback is skipped")
+	}
+	nudgeSessionFn = func(_ *tmux.Tmux, _, _ string) error {
+		t.Fatal("nudgeSessionFn should not be called when fallback is skipped")
+		return nil
+	}
+
+	d.applyStartupBootstrap("gt-gastown-cheedo", "gastown-polecat-cheedo", parsed)
+}
+
+func TestApplyStartupBootstrap_NudgeFailureIsLoggedAndContinues(t *testing.T) {
+	var logBuf bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logBuf, "", 0),
+	}
+	parsed := &ParsedIdentity{RoleType: "polecat", RigName: "gastown", AgentName: "cheedo"}
+
+	origResolve := resolveRoleAgentConfigFn
+	origFallback := startupFallbackCommandsFn
+	origDelay := startupReadyDelayFn
+	origNudge := nudgeSessionFn
+	t.Cleanup(func() {
+		resolveRoleAgentConfigFn = origResolve
+		startupFallbackCommandsFn = origFallback
+		startupReadyDelayFn = origDelay
+		nudgeSessionFn = origNudge
+	})
+
+	resolveRoleAgentConfigFn = func(_, _, _ string) *config.RuntimeConfig {
+		return &config.RuntimeConfig{}
+	}
+	startupFallbackCommandsFn = func(_ string, _ *config.RuntimeConfig) []string {
+		return []string{"first", "second"}
+	}
+	startupReadyDelayFn = func(_ *config.RuntimeConfig) {}
+
+	nudgeCalls := 0
+	nudgeSessionFn = func(_ *tmux.Tmux, _, command string) error {
+		nudgeCalls++
+		if command == "first" {
+			return errors.New("boom")
+		}
+		return nil
+	}
+
+	d.applyStartupBootstrap("gt-gastown-cheedo", "gastown-polecat-cheedo", parsed)
+
+	if nudgeCalls != 2 {
+		t.Fatalf("nudgeSessionFn calls = %d, want 2", nudgeCalls)
+	}
+	if !strings.Contains(logBuf.String(), "startup bootstrap nudge failed") {
+		t.Fatalf("expected warning log for nudge failure, got logs:\n%s", logBuf.String())
 	}
 }
