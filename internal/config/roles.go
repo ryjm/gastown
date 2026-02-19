@@ -115,6 +115,80 @@ func RigRoles() []string {
 	return []string{"witness", "refinery", "polecat", "crew"}
 }
 
+// StartupFallbackRolePlan describes role-aware startup fallback actions.
+// The commands should be safe to run repeatedly across restarts.
+type StartupFallbackRolePlan struct {
+	// PrePrimeCommand runs before gt prime.
+	// Example: deacon heartbeat before bootstrap.
+	PrePrimeCommand string
+
+	// PrimeCommand is the bootstrap command for this role.
+	// Defaults to "gt prime" when empty.
+	PrimeCommand string
+
+	// AutoMailInject controls whether startup fallback appends:
+	// "gt mail check --inject".
+	AutoMailInject bool
+
+	// PromptlessCommand runs after bootstrap when runtime prompt mode is "none".
+	// This gives prompt-less runtimes a role-specific next action.
+	PromptlessCommand string
+}
+
+var defaultStartupFallbackRolePlan = StartupFallbackRolePlan{
+	PrimeCommand: "gt prime",
+}
+
+var startupFallbackRolePlans = map[string]StartupFallbackRolePlan{
+	"boot": {
+		PrimeCommand: "gt prime && gt boot triage",
+	},
+	"deacon": {
+		PrePrimeCommand:   "gt deacon heartbeat \"boot patrol\"",
+		PrimeCommand:      "gt prime",
+		AutoMailInject:    true,
+		PromptlessCommand: "gt hook",
+	},
+	"dog": {
+		PrimeCommand:      "gt prime",
+		AutoMailInject:    true,
+		PromptlessCommand: "gt mail inbox",
+	},
+	"mayor": {
+		PrimeCommand:      "gt prime",
+		PromptlessCommand: "gt mail inbox && gt hook",
+	},
+	"witness": {
+		PrimeCommand:      "gt prime",
+		AutoMailInject:    true,
+		PromptlessCommand: "gt hook",
+	},
+	"refinery": {
+		PrimeCommand:      "gt prime",
+		AutoMailInject:    true,
+		PromptlessCommand: "gt hook",
+	},
+	"polecat": {
+		PrimeCommand:      "gt prime",
+		AutoMailInject:    true,
+		PromptlessCommand: "gt hook",
+	},
+	"crew": {
+		PrimeCommand:      "gt prime",
+		PromptlessCommand: "gt hook && gt mail inbox",
+	},
+}
+
+// StartupFallbackPlanForRole returns role metadata used to generate startup
+// fallback commands for non-hook runtimes.
+func StartupFallbackPlanForRole(role string) StartupFallbackRolePlan {
+	normalized := strings.ToLower(strings.TrimSpace(role))
+	if plan, ok := startupFallbackRolePlans[normalized]; ok {
+		return plan
+	}
+	return defaultStartupFallbackRolePlan
+}
+
 // isValidRoleName checks if the given name is a known role.
 func isValidRoleName(name string) bool {
 	for _, r := range AllRoles() {
