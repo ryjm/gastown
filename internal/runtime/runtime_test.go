@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -290,6 +291,90 @@ func TestStartupFallbackCommands_RoleCasing(t *testing.T) {
 	commands := StartupFallbackCommands("POLECAT", rc)
 	if commands == nil {
 		t.Error("StartupFallbackCommands() should handle uppercase role")
+	}
+}
+
+func TestStartupFallbackCommands_RoleAwareMatrix(t *testing.T) {
+	codexNoHooks := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+	}
+	claudeHooks := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "claude",
+		},
+	}
+	informationalHooks := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider:      "copilot",
+			Informational: true,
+		},
+	}
+
+	tests := []struct {
+		name string
+		role string
+		rc   *config.RuntimeConfig
+		want []string
+	}{
+		{
+			name: "codex polecat injects mail",
+			role: "polecat",
+			rc:   codexNoHooks,
+			want: []string{"gt prime && gt mail check --inject"},
+		},
+		{
+			name: "codex uppercase witness injects mail",
+			role: "WITNESS",
+			rc:   codexNoHooks,
+			want: []string{"gt prime && gt mail check --inject"},
+		},
+		{
+			name: "codex deacon includes heartbeat and inject",
+			role: "deacon",
+			rc:   codexNoHooks,
+			want: []string{"gt deacon heartbeat \"boot patrol\" && gt prime && gt mail check --inject"},
+		},
+		{
+			name: "codex boot runs triage without mail inject",
+			role: "boot",
+			rc:   codexNoHooks,
+			want: []string{"gt prime && gt boot triage"},
+		},
+		{
+			name: "codex non-autonomous role runs only prime",
+			role: "mayor",
+			rc:   codexNoHooks,
+			want: []string{"gt prime"},
+		},
+		{
+			name: "claude hooks skip fallback for autonomous role",
+			role: "polecat",
+			rc:   claudeHooks,
+			want: nil,
+		},
+		{
+			name: "claude hooks skip fallback for boot role",
+			role: "boot",
+			rc:   claudeHooks,
+			want: nil,
+		},
+		{
+			name: "informational hooks behave like no hooks",
+			role: "POLECAT",
+			rc:   informationalHooks,
+			want: []string{"gt prime && gt mail check --inject"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := StartupFallbackCommands(tt.role, tt.rc)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("StartupFallbackCommands(%q) = %#v, want %#v", tt.role, got, tt.want)
+			}
+		})
 	}
 }
 
