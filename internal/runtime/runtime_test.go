@@ -475,6 +475,158 @@ func TestGetStartupFallbackInfo_NilConfig(t *testing.T) {
 	}
 }
 
+func TestBuildStartupBootstrapContract_HooksNoPrompt_CombinedNudge(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		PromptMode: "none",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "claude",
+		},
+	}
+
+	contract := BuildStartupBootstrapContract(StartupBootstrapSpec{
+		Role:                "polecat",
+		BeaconMessage:       "beacon",
+		StartupNudgeMessage: "startup",
+	}, rc)
+
+	if contract == nil {
+		t.Fatal("BuildStartupBootstrapContract should return contract")
+	}
+	if len(contract.Steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(contract.Steps))
+	}
+	if contract.Steps[0].Kind != StartupBootstrapStepNudge {
+		t.Fatalf("expected first step to be nudge, got %s", contract.Steps[0].Kind)
+	}
+	if contract.Steps[0].Command != "beacon\n\nstartup" {
+		t.Fatalf("unexpected combined command: %q", contract.Steps[0].Command)
+	}
+}
+
+func TestBuildStartupBootstrapContract_NoHooksNoPrompt_BeaconThenDelayedStartup(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		PromptMode: "none",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+	}
+
+	contract := BuildStartupBootstrapContract(StartupBootstrapSpec{
+		Role:                "polecat",
+		BeaconMessage:       "beacon",
+		StartupNudgeMessage: "startup",
+	}, rc)
+
+	if len(contract.Steps) != 3 {
+		t.Fatalf("expected 3 steps, got %d", len(contract.Steps))
+	}
+	if contract.Steps[0].Kind != StartupBootstrapStepNudge || contract.Steps[0].Command != "beacon" {
+		t.Fatalf("unexpected step 0: %+v", contract.Steps[0])
+	}
+	if contract.Steps[1].Kind != StartupBootstrapStepWait {
+		t.Fatalf("expected step 1 wait, got %s", contract.Steps[1].Kind)
+	}
+	if contract.Steps[1].Delay != time.Duration(DefaultPrimeWaitMs)*time.Millisecond {
+		t.Fatalf("unexpected wait delay: %v", contract.Steps[1].Delay)
+	}
+	if contract.Steps[2].Kind != StartupBootstrapStepNudge || contract.Steps[2].Command != "startup" {
+		t.Fatalf("unexpected step 2: %+v", contract.Steps[2])
+	}
+}
+
+func TestBuildStartupBootstrapContract_FallbackCommands_AddsReadyDelayWhenNotApplied(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+		Tmux: &config.RuntimeTmuxConfig{
+			ReadyDelayMs: 250,
+		},
+	}
+
+	contract := BuildStartupBootstrapContract(StartupBootstrapSpec{
+		Role:                    "polecat",
+		IncludeFallbackCommands: true,
+		ReadyDelayApplied:       false,
+	}, rc)
+
+	if len(contract.Steps) < 2 {
+		t.Fatalf("expected at least 2 steps, got %d", len(contract.Steps))
+	}
+	if contract.Steps[0].Kind != StartupBootstrapStepWait {
+		t.Fatalf("expected first step wait, got %s", contract.Steps[0].Kind)
+	}
+	if contract.Steps[0].Delay != 250*time.Millisecond {
+		t.Fatalf("unexpected ready delay: %v", contract.Steps[0].Delay)
+	}
+	if contract.Steps[1].Kind != StartupBootstrapStepNudge {
+		t.Fatalf("expected second step nudge, got %s", contract.Steps[1].Kind)
+	}
+	if !contains(contract.Steps[1].Command, "gt prime") {
+		t.Fatalf("fallback command should include gt prime, got %q", contract.Steps[1].Command)
+	}
+}
+
+func TestBuildStartupBootstrapContract_FallbackCommands_SkipsReadyDelayWhenApplied(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+		Tmux: &config.RuntimeTmuxConfig{
+			ReadyDelayMs: 250,
+		},
+	}
+
+	contract := BuildStartupBootstrapContract(StartupBootstrapSpec{
+		Role:                    "polecat",
+		IncludeFallbackCommands: true,
+		ReadyDelayApplied:       true,
+	}, rc)
+
+	if len(contract.Steps) == 0 {
+		t.Fatal("expected at least one fallback step")
+	}
+	if contract.Steps[0].Kind != StartupBootstrapStepNudge {
+		t.Fatalf("expected first step nudge, got %s", contract.Steps[0].Kind)
+	}
+}
+
+func TestExecuteStartupBootstrapContract_Order(t *testing.T) {
+	events := make([]string, 0, 4)
+	nudger := &recordingNudger{events: &events}
+
+	contract := &StartupBootstrapContract{
+		Steps: []StartupBootstrapStep{
+			{Kind: StartupBootstrapStepWait, Delay: 3 * time.Millisecond},
+			{Kind: StartupBootstrapStepNudge, Command: "one"},
+			{Kind: StartupBootstrapStepWait, Delay: 1 * time.Millisecond},
+			{Kind: StartupBootstrapStepNudge, Command: "two"},
+		},
+	}
+
+	err := executeStartupBootstrapContract(nudger, "session", contract, func(d time.Duration) {
+		events = append(events, "wait:"+d.String())
+	})
+	if err != nil {
+		t.Fatalf("executeStartupBootstrapContract returned error: %v", err)
+	}
+
+	expected := []string{
+		"wait:3ms",
+		"nudge:one",
+		"wait:1ms",
+		"nudge:two",
+	}
+	if len(events) != len(expected) {
+		t.Fatalf("expected %d events, got %d (%v)", len(expected), len(events), events)
+	}
+	for i := range expected {
+		if events[i] != expected[i] {
+			t.Fatalf("event %d mismatch: got %q want %q (all=%v)", i, events[i], expected[i], events)
+		}
+	}
+}
+
 func TestStartupNudgeContent(t *testing.T) {
 	content := StartupNudgeContent()
 	if content == "" {
@@ -576,6 +728,15 @@ func TestEnsureSettingsForRole_GeminiUsesWorkDir(t *testing.T) {
 	if _, err := os.Stat(workDir + "/.gemini/settings.json"); err != nil {
 		t.Error("Gemini settings should be in workDir")
 	}
+}
+
+type recordingNudger struct {
+	events *[]string
+}
+
+func (r *recordingNudger) NudgeSession(_ string, message string) error {
+	*r.events = append(*r.events, "nudge:"+message)
+	return nil
 }
 
 // Helper function

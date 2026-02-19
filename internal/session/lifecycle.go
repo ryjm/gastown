@@ -247,17 +247,12 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (*StartResult, error) {
 		if fallbackRole == "" {
 			fallbackRole = cfg.Role
 		}
-		commands := runtime.StartupFallbackCommands(fallbackRole, runtimeConfig)
-		if len(commands) > 0 {
-			// If caller did not explicitly request ready delay, still wait before nudging.
-			// Prompt-less runtimes need this for reliable startup command delivery.
-			if !cfg.ReadyDelay {
-				runtime.SleepForReadyDelay(runtimeConfig)
-			}
-			for _, command := range commands {
-				_ = t.NudgeSession(cfg.SessionID, command)
-			}
-		}
+		bootstrap := runtime.BuildStartupBootstrapContract(runtime.StartupBootstrapSpec{
+			Role:                    fallbackRole,
+			IncludeFallbackCommands: true,
+			ReadyDelayApplied:       cfg.ReadyDelay,
+		}, runtimeConfig)
+		_ = runtime.ExecuteStartupBootstrapContract(t, cfg.SessionID, bootstrap)
 	}
 
 	// 13. Verify session survived startup.

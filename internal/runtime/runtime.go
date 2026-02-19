@@ -142,13 +142,14 @@ func StartupFallbackCommands(role string, rc *config.RuntimeConfig) []string {
 
 // RunStartupFallback sends the startup fallback commands via tmux.
 func RunStartupFallback(t *tmux.Tmux, sessionID, role string, rc *config.RuntimeConfig) error {
-	commands := StartupFallbackCommands(role, rc)
-	for _, cmd := range commands {
-		if err := t.NudgeSession(sessionID, cmd); err != nil {
-			return err
-		}
-	}
-	return nil
+	// Legacy wrapper for callers that only need fallback commands.
+	// Preserve previous behavior: immediate dispatch with no extra ready-delay wait.
+	contract := BuildStartupBootstrapContract(StartupBootstrapSpec{
+		Role:                    role,
+		IncludeFallbackCommands: true,
+		ReadyDelayApplied:       true,
+	}, rc)
+	return ExecuteStartupBootstrapContract(t, sessionID, contract)
 }
 
 // isAutonomousRole returns true if the given role should automatically
@@ -198,6 +199,167 @@ type StartupFallbackInfo struct {
 	// StartupNudgeDelayMs is milliseconds to wait before sending work instructions nudge.
 	// Allows gt prime to complete for non-hook agents (where it's not automatic).
 	StartupNudgeDelayMs int
+}
+
+// StartupBootstrapSpec describes which startup bootstrap actions to plan.
+// The spec allows each session entrypoint to request the same capability-aware
+// behavior (beacon nudge, startup nudge, fallback commands) without re-implementing
+// sequencing logic.
+type StartupBootstrapSpec struct {
+	// Role determines which fallback commands are generated.
+	Role string
+
+	// BeaconMessage is the startup beacon text. If empty, no beacon nudge is planned.
+	BeaconMessage string
+
+	// StartupNudgeMessage is the startup instruction nudge text.
+	// If empty, no startup nudge is planned.
+	StartupNudgeMessage string
+
+	// IncludeFallbackCommands appends legacy fallback command nudges.
+	IncludeFallbackCommands bool
+
+	// ReadyDelayApplied indicates whether caller already ran SleepForReadyDelay.
+	// When false and fallback commands are planned, the contract inserts the
+	// runtime ready-delay wait before dispatching fallback commands.
+	ReadyDelayApplied bool
+}
+
+// StartupBootstrapStepKind identifies one bootstrap action in execution order.
+type StartupBootstrapStepKind string
+
+const (
+	// StartupBootstrapStepWait waits before dispatching later bootstrap steps.
+	StartupBootstrapStepWait StartupBootstrapStepKind = "wait"
+
+	// StartupBootstrapStepNudge sends a tmux nudge command/message.
+	StartupBootstrapStepNudge StartupBootstrapStepKind = "nudge"
+)
+
+// StartupBootstrapStep is one ordered bootstrap action.
+type StartupBootstrapStep struct {
+	Kind StartupBootstrapStepKind
+
+	// Delay applies only when Kind == StartupBootstrapStepWait.
+	Delay time.Duration
+
+	// Command applies only when Kind == StartupBootstrapStepNudge.
+	Command string
+}
+
+// StartupBootstrapContract is the shared startup bootstrap execution plan.
+// It exposes computed capability info and explicit ordered steps that
+// session entrypoints can execute consistently.
+type StartupBootstrapContract struct {
+	Info  *StartupFallbackInfo
+	Steps []StartupBootstrapStep
+}
+
+type startupBootstrapNudger interface {
+	NudgeSession(sessionID, message string) error
+}
+
+// BuildStartupBootstrapContract creates the ordered startup bootstrap plan.
+// This is the canonical startup contract for capability-aware startup behavior.
+func BuildStartupBootstrapContract(spec StartupBootstrapSpec, rc *config.RuntimeConfig) *StartupBootstrapContract {
+	info := GetStartupFallbackInfo(rc)
+	steps := make([]StartupBootstrapStep, 0, 6)
+
+	if info.SendBeaconNudge && info.SendStartupNudge && info.StartupNudgeDelayMs == 0 && spec.BeaconMessage != "" && spec.StartupNudgeMessage != "" {
+		// Hook-capable but prompt-less runtimes can receive a single combined
+		// message because hooks already handled gt prime synchronously.
+		steps = append(steps, StartupBootstrapStep{
+			Kind:    StartupBootstrapStepNudge,
+			Command: spec.BeaconMessage + "\n\n" + spec.StartupNudgeMessage,
+		})
+	} else {
+		if info.SendBeaconNudge && spec.BeaconMessage != "" {
+			steps = append(steps, StartupBootstrapStep{
+				Kind:    StartupBootstrapStepNudge,
+				Command: spec.BeaconMessage,
+			})
+		}
+
+		if info.SendStartupNudge && spec.StartupNudgeMessage != "" {
+			if info.StartupNudgeDelayMs > 0 {
+				steps = append(steps, StartupBootstrapStep{
+					Kind:  StartupBootstrapStepWait,
+					Delay: time.Duration(info.StartupNudgeDelayMs) * time.Millisecond,
+				})
+			}
+			steps = append(steps, StartupBootstrapStep{
+				Kind:    StartupBootstrapStepNudge,
+				Command: spec.StartupNudgeMessage,
+			})
+		}
+	}
+
+	if spec.IncludeFallbackCommands {
+		commands := StartupFallbackCommands(spec.Role, rc)
+		if len(commands) > 0 {
+			if !spec.ReadyDelayApplied {
+				if readyDelay := readyDelayDuration(rc); readyDelay > 0 {
+					steps = append(steps, StartupBootstrapStep{
+						Kind:  StartupBootstrapStepWait,
+						Delay: readyDelay,
+					})
+				}
+			}
+			for _, command := range commands {
+				steps = append(steps, StartupBootstrapStep{
+					Kind:    StartupBootstrapStepNudge,
+					Command: command,
+				})
+			}
+		}
+	}
+
+	return &StartupBootstrapContract{
+		Info:  info,
+		Steps: steps,
+	}
+}
+
+// ExecuteStartupBootstrapContract runs the ordered startup bootstrap steps.
+func ExecuteStartupBootstrapContract(t *tmux.Tmux, sessionID string, contract *StartupBootstrapContract) error {
+	return executeStartupBootstrapContract(t, sessionID, contract, time.Sleep)
+}
+
+func executeStartupBootstrapContract(t startupBootstrapNudger, sessionID string, contract *StartupBootstrapContract, sleepFn func(time.Duration)) error {
+	if contract == nil {
+		return nil
+	}
+	if sleepFn == nil {
+		sleepFn = time.Sleep
+	}
+
+	for _, step := range contract.Steps {
+		switch step.Kind {
+		case StartupBootstrapStepWait:
+			if step.Delay > 0 {
+				sleepFn(step.Delay)
+			}
+		case StartupBootstrapStepNudge:
+			if step.Command == "" {
+				continue
+			}
+			if err := t.NudgeSession(sessionID, step.Command); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func readyDelayDuration(rc *config.RuntimeConfig) time.Duration {
+	if rc == nil {
+		rc = config.DefaultRuntimeConfig()
+	}
+	if rc.Tmux == nil || rc.Tmux.ReadyDelayMs <= 0 {
+		return 0
+	}
+	return time.Duration(rc.Tmux.ReadyDelayMs) * time.Millisecond
 }
 
 // GetStartupFallbackInfo returns the fallback actions needed based on agent capabilities.
