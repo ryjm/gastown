@@ -279,6 +279,26 @@ func TestStartupFallbackCommands_NonAutonomousRole(t *testing.T) {
 	}
 }
 
+func TestStartupFallbackCommands_CodexCrew(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		PromptMode: "none",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+	}
+
+	commands := StartupFallbackCommands("crew", rc)
+	if len(commands) == 0 {
+		t.Fatal("StartupFallbackCommands() should return crew fallback commands")
+	}
+	if !contains(commands[0], "gt prime") {
+		t.Errorf("crew fallback should include gt prime, got %q", commands[0])
+	}
+	if contains(commands[0], "mail check --inject") {
+		t.Errorf("crew fallback should not inject mail, got %q", commands[0])
+	}
+}
+
 func TestStartupFallbackCommands_RoleCasing(t *testing.T) {
 	rc := &config.RuntimeConfig{
 		Hooks: &config.RuntimeHooksConfig{
@@ -456,8 +476,8 @@ func TestGetStartupFallbackInfo_NoHooksNoPrompt(t *testing.T) {
 	if !info.SendStartupNudge {
 		t.Error("NoHooks+NoPrompt should need startup nudge")
 	}
-	if info.StartupNudgeDelayMs <= 0 {
-		t.Error("NoHooks+NoPrompt should wait for gt prime to complete")
+	if info.StartupNudgeDelayMs != DefaultPrimeWaitMs {
+		t.Errorf("NoHooks+NoPrompt should wait %dms, got %d", DefaultPrimeWaitMs, info.StartupNudgeDelayMs)
 	}
 	if !info.SendBeaconNudge {
 		t.Error("NoHooks+NoPrompt should send beacon via nudge (no prompt)")

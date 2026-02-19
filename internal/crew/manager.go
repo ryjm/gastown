@@ -16,8 +16,8 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -597,6 +597,25 @@ func (m *Manager) SessionName(name string) string {
 	return session.CrewSessionName(session.PrefixFor(m.rig.Name), name)
 }
 
+func buildCrewStartupBeacon(rigName, crewName, topic string, fallbackInfo *runtime.StartupFallbackInfo) string {
+	if topic == "" {
+		topic = "start"
+	}
+
+	beaconConfig := session.BeaconConfig{
+		Recipient: fmt.Sprintf("%s/crew/%s", rigName, crewName),
+		Sender:    "human",
+		Topic:     topic,
+	}
+
+	if fallbackInfo != nil {
+		beaconConfig.IncludePrimeInstruction = fallbackInfo.IncludePrimeInBeacon
+		beaconConfig.ExcludeWorkInstructions = fallbackInfo.SendStartupNudge
+	}
+
+	return session.FormatStartupBeacon(beaconConfig)
+}
+
 // Start creates and starts a tmux session for a crew member.
 // If the crew member doesn't exist, it will be created first.
 func (m *Manager) Start(name string, opts StartOptions) error {
@@ -624,6 +643,14 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 
 	townRoot := filepath.Dir(m.rig.Path)
 	runtimeConfig := config.ResolveRoleAgentConfig("crew", townRoot, m.rig.Path)
+	var (
+		beacon       string
+		fallbackInfo *runtime.StartupFallbackInfo
+	)
+	if opts.ResumeSessionID == "" {
+		fallbackInfo = runtime.GetStartupFallbackInfo(runtimeConfig)
+		beacon = buildCrewStartupBeacon(m.rig.Name, name, opts.Topic, fallbackInfo)
+	}
 	agentName := opts.AgentOverride
 	if agentName == "" {
 		agentName = filepath.Base(runtimeConfig.Command)
@@ -691,17 +718,8 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 		claudeCmd += " " + resumeArgs
 	} else {
 		// Normal start: build beacon for predecessor discovery via /resume.
-		// Only used in fresh-start mode — resumed sessions already have context.
-		address := fmt.Sprintf("%s/crew/%s", m.rig.Name, name)
-		topic := opts.Topic
-		if topic == "" {
-			topic = "start"
-		}
-		beacon := session.FormatStartupBeacon(session.BeaconConfig{
-			Recipient: address,
-			Sender:    "human",
-			Topic:     topic,
-		})
+		// For non-hook agents, shared startup fallback adds "Run gt prime" and
+		// defers work instructions to a separate nudge after priming completes.
 		claudeCmd, err = config.BuildCrewStartupCommandWithAgentOverride(m.rig.Name, name, m.rig.Path, beacon, opts.AgentOverride)
 		if err != nil {
 			return fmt.Errorf("building startup command: %w", err)
@@ -763,11 +781,37 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// Track PID for defense-in-depth orphan cleanup (non-fatal)
 	_ = session.TrackSessionPID(townRoot, sessionID, t)
 
-	// Non-hook runtimes (e.g., codex) need startup fallback commands since
-	// SessionStart hooks won't run gt prime automatically.
-	if commands := runtime.StartupFallbackCommands("crew", runtimeConfig); len(commands) > 0 {
-		runtime.SleepForReadyDelay(runtimeConfig)
-		_ = runtime.RunStartupFallback(t, sessionID, "crew", runtimeConfig)
+	// Resume mode restores an existing session context and should not replay
+	// startup bootstrap nudges/commands.
+	if opts.ResumeSessionID == "" {
+		hasStartupNudges := fallbackInfo != nil && (fallbackInfo.SendBeaconNudge || fallbackInfo.SendStartupNudge)
+
+		if hasStartupNudges {
+			runtime.SleepForReadyDelay(runtimeConfig)
+
+			if fallbackInfo.SendBeaconNudge && fallbackInfo.SendStartupNudge && fallbackInfo.StartupNudgeDelayMs == 0 {
+				_ = t.NudgeSession(sessionID, beacon+"\n\n"+runtime.StartupNudgeContent())
+			} else {
+				if fallbackInfo.SendBeaconNudge {
+					_ = t.NudgeSession(sessionID, beacon)
+				}
+				if fallbackInfo.StartupNudgeDelayMs > 0 {
+					time.Sleep(time.Duration(fallbackInfo.StartupNudgeDelayMs) * time.Millisecond)
+				}
+				if fallbackInfo.SendStartupNudge {
+					_ = t.NudgeSession(sessionID, runtime.StartupNudgeContent())
+				}
+			}
+		}
+
+		// Non-hook runtimes (e.g., codex) also need startup fallback commands since
+		// SessionStart hooks won't run gt prime automatically.
+		if commands := runtime.StartupFallbackCommands("crew", runtimeConfig); len(commands) > 0 {
+			if !hasStartupNudges {
+				runtime.SleepForReadyDelay(runtimeConfig)
+			}
+			_ = runtime.RunStartupFallback(t, sessionID, "crew", runtimeConfig)
+		}
 	}
 
 	// Note: We intentionally don't wait for the agent to start here.

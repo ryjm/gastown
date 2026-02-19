@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/runtime"
 )
 
 func TestManagerAddAndGet(t *testing.T) {
@@ -597,6 +598,50 @@ func TestValidateSessionID(t *testing.T) {
 	}
 }
 
+func TestBuildCrewStartupBeacon_DefaultTopic(t *testing.T) {
+	t.Parallel()
+
+	beacon := buildCrewStartupBeacon("gastown", "toast", "", nil)
+	if !strings.Contains(beacon, "[GAS TOWN] gastown/crew/toast <- human") {
+		t.Errorf("beacon missing crew address: %q", beacon)
+	}
+	if !strings.Contains(beacon, "• start") {
+		t.Errorf("beacon should default topic to start: %q", beacon)
+	}
+	if strings.Contains(beacon, "Run `gt prime`") {
+		t.Errorf("default beacon should not include prime instruction: %q", beacon)
+	}
+}
+
+func TestBuildCrewStartupBeacon_CodexFallbackIncludesPrime(t *testing.T) {
+	t.Parallel()
+
+	fallbackInfo := &runtime.StartupFallbackInfo{
+		IncludePrimeInBeacon: true,
+		SendStartupNudge:     true,
+	}
+	beacon := buildCrewStartupBeacon("gastown", "toast", "assigned", fallbackInfo)
+	if !strings.Contains(beacon, "Run `gt prime` to initialize your context.") {
+		t.Errorf("codex fallback beacon should include prime instruction: %q", beacon)
+	}
+	if strings.Contains(beacon, "begin work on your hook") {
+		t.Errorf("codex fallback beacon should defer work instructions to startup nudge: %q", beacon)
+	}
+}
+
+func TestBuildCrewStartupBeacon_HookedPromptKeepsWorkInstructions(t *testing.T) {
+	t.Parallel()
+
+	fallbackInfo := &runtime.StartupFallbackInfo{
+		IncludePrimeInBeacon: false,
+		SendStartupNudge:     false,
+	}
+	beacon := buildCrewStartupBeacon("gastown", "toast", "assigned", fallbackInfo)
+	if !strings.Contains(beacon, "Run `gt prime --hook` and begin work on your hook.") {
+		t.Errorf("hooked prompt beacon should include direct work instruction: %q", beacon)
+	}
+}
+
 func TestStartOptionsResumeValidation(t *testing.T) {
 	t.Parallel()
 
@@ -724,7 +769,6 @@ func TestBuildResumeArgs(t *testing.T) {
 		})
 	}
 }
-
 
 // Helper to run commands
 func runCmd(name string, args ...string) error {
