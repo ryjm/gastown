@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -35,6 +36,13 @@ type BeadsMessage struct {
 // MaxLifecycleMessageAge is the maximum age of a lifecycle message before it's ignored.
 // Messages older than this are considered stale and deleted without execution.
 const MaxLifecycleMessageAge = 6 * time.Hour
+
+var resolveRoleAgentConfigFn = config.ResolveRoleAgentConfig
+var startupFallbackCommandsFn = runtime.StartupFallbackCommands
+var startupReadyDelayFn = runtime.SleepForReadyDelay
+var nudgeSessionFn = func(t *tmux.Tmux, sessionName, command string) error {
+	return t.NudgeSession(sessionName, command)
+}
 
 // ProcessLifecycleRequests checks for and processes lifecycle requests from the deacon inbox.
 func (d *Daemon) ProcessLifecycleRequests() {
@@ -343,7 +351,7 @@ func (d *Daemon) identityToSession(identity string) string {
 // Uses role config if available, falls back to hardcoded defaults.
 func (d *Daemon) restartSession(sessionName, identity string) error {
 	// Get role config for this identity
-	config, parsed, err := d.getRoleConfigForIdentity(identity)
+	roleConfig, parsed, err := d.getRoleConfigForIdentity(identity)
 	if err != nil {
 		return fmt.Errorf("parsing identity: %w", err)
 	}
@@ -358,13 +366,13 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 	}
 
 	// Determine working directory
-	workDir := d.getWorkDir(config, parsed)
+	workDir := d.getWorkDir(roleConfig, parsed)
 	if workDir == "" {
 		return fmt.Errorf("cannot determine working directory for %s", identity)
 	}
 
 	// Determine if pre-sync is needed
-	needsPreSync := d.getNeedsPreSync(config, parsed)
+	needsPreSync := d.getNeedsPreSync(roleConfig, parsed)
 
 	// Pre-sync workspace for agents with git worktrees
 	if needsPreSync {
@@ -379,13 +387,13 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 	}
 
 	// Set environment variables
-	d.setSessionEnvironment(sessionName, config, parsed)
+	d.setSessionEnvironment(sessionName, roleConfig, parsed)
 
 	// Apply theme (non-fatal: theming failure doesn't affect operation)
 	d.applySessionTheme(sessionName, parsed)
 
 	// Get and send startup command
-	startCmd := d.getStartCommand(config, parsed)
+	startCmd := d.getStartCommand(roleConfig, parsed)
 	if err := d.tmux.SendKeys(sessionName, startCmd); err != nil {
 		return fmt.Errorf("sending startup command: %w", err)
 	}
@@ -397,8 +405,40 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 	}
 	_ = d.tmux.AcceptBypassPermissionsWarning(sessionName)
 	time.Sleep(constants.ShutdownNotifyDelay)
+	d.applyStartupBootstrap(sessionName, identity, parsed)
 
 	return nil
+}
+
+// applyStartupBootstrap runs shared startup fallback commands for runtimes
+// that do not support executable hooks.
+func (d *Daemon) applyStartupBootstrap(sessionName, identity string, parsed *ParsedIdentity) {
+	if parsed == nil || parsed.RoleType == "" {
+		return
+	}
+
+	rigPath := ""
+	if parsed.RigName != "" {
+		rigPath = filepath.Join(d.config.TownRoot, parsed.RigName)
+	}
+
+	runtimeConfig := resolveRoleAgentConfigFn(parsed.RoleType, d.config.TownRoot, rigPath)
+	commands := startupFallbackCommandsFn(parsed.RoleType, runtimeConfig)
+	if len(commands) == 0 {
+		return
+	}
+
+	// Match shared startup lifecycle behavior: wait for runtime readiness
+	// before sending fallback commands to prompt-less runtimes.
+	startupReadyDelayFn(runtimeConfig)
+
+	for _, command := range commands {
+		if err := nudgeSessionFn(d.tmux, sessionName, command); err != nil {
+			d.logger.Printf("Warning: startup bootstrap nudge failed for %s (%s): %v", identity, command, err)
+			continue
+		}
+		d.logger.Printf("Applied startup bootstrap for %s: %s", identity, command)
+	}
 }
 
 // getWorkDir determines the working directory for an agent.
