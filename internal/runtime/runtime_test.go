@@ -193,7 +193,7 @@ func TestStartupFallbackCommands_AutonomousRole(t *testing.T) {
 		},
 	}
 
-	autonomousRoles := []string{"polecat", "witness", "refinery", "deacon"}
+	autonomousRoles := []string{"polecat", "witness", "refinery", "deacon", "dog"}
 	for _, role := range autonomousRoles {
 		t.Run(role, func(t *testing.T) {
 			commands := StartupFallbackCommands(role, rc)
@@ -290,6 +290,92 @@ func TestStartupFallbackCommands_RoleCasing(t *testing.T) {
 	commands := StartupFallbackCommands("POLECAT", rc)
 	if commands == nil {
 		t.Error("StartupFallbackCommands() should handle uppercase role")
+	}
+}
+
+func TestStartupFallbackCommands_RoleAwareCapabilityMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		role         string
+		promptMode   string
+		wantContains []string
+		wantMissing  []string
+	}{
+		{
+			name:         "polecat prompt-capable",
+			role:         "polecat",
+			promptMode:   "arg",
+			wantContains: []string{"gt prime", "gt mail check --inject"},
+			wantMissing:  []string{"&& gt hook"},
+		},
+		{
+			name:         "polecat promptless",
+			role:         "polecat",
+			promptMode:   "none",
+			wantContains: []string{"gt prime", "gt mail check --inject", "gt hook"},
+		},
+		{
+			name:         "mayor prompt-capable",
+			role:         "mayor",
+			promptMode:   "arg",
+			wantContains: []string{"gt prime"},
+			wantMissing:  []string{"mail check --inject", "gt mail inbox"},
+		},
+		{
+			name:         "mayor promptless",
+			role:         "mayor",
+			promptMode:   "none",
+			wantContains: []string{"gt prime", "gt mail inbox", "gt hook"},
+			wantMissing:  []string{"mail check --inject"},
+		},
+		{
+			name:         "deacon promptless",
+			role:         "deacon",
+			promptMode:   "none",
+			wantContains: []string{"gt deacon heartbeat", "gt prime", "gt mail check --inject", "gt hook"},
+		},
+		{
+			name:         "dog promptless",
+			role:         "dog",
+			promptMode:   "none",
+			wantContains: []string{"gt prime", "gt mail check --inject", "gt mail inbox"},
+			wantMissing:  []string{"&& gt hook"},
+		},
+		{
+			name:         "boot promptless",
+			role:         "boot",
+			promptMode:   "none",
+			wantContains: []string{"gt boot triage"},
+			wantMissing:  []string{"mail check --inject"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rc := &config.RuntimeConfig{
+				PromptMode: tt.promptMode,
+				Hooks: &config.RuntimeHooksConfig{
+					Provider: "none",
+				},
+			}
+
+			commands := StartupFallbackCommands(tt.role, rc)
+			if len(commands) == 0 {
+				t.Fatalf("StartupFallbackCommands(%s) returned no commands", tt.role)
+			}
+
+			command := commands[0]
+			for _, want := range tt.wantContains {
+				if !contains(command, want) {
+					t.Errorf("command %q should contain %q", command, want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if contains(command, missing) {
+					t.Errorf("command %q should not contain %q", command, missing)
+				}
+			}
+		})
 	}
 }
 

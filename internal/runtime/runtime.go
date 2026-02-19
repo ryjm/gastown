@@ -108,36 +108,54 @@ func SleepForReadyDelay(rc *config.RuntimeConfig) {
 	time.Sleep(time.Duration(rc.Tmux.ReadyDelayMs) * time.Millisecond)
 }
 
-// StartupFallbackCommands returns commands that approximate Claude hooks when hooks are unavailable.
-func StartupFallbackCommands(role string, rc *config.RuntimeConfig) []string {
+type startupCapabilities struct {
+	HasHooks  bool
+	HasPrompt bool
+}
+
+func resolveStartupCapabilities(rc *config.RuntimeConfig) startupCapabilities {
 	if rc == nil {
 		rc = config.DefaultRuntimeConfig()
 	}
-	if rc.Hooks != nil && rc.Hooks.Provider != "" && rc.Hooks.Provider != "none" && !rc.Hooks.Informational {
+	return startupCapabilities{
+		HasHooks:  rc.Hooks != nil && rc.Hooks.Provider != "" && rc.Hooks.Provider != "none" && !rc.Hooks.Informational,
+		HasPrompt: rc.PromptMode != "none",
+	}
+}
+
+// StartupFallbackCommands returns commands that approximate Claude hooks when hooks are unavailable.
+func StartupFallbackCommands(role string, rc *config.RuntimeConfig) []string {
+	capabilities := resolveStartupCapabilities(rc)
+	if capabilities.HasHooks {
 		return nil
 	}
 
-	role = strings.ToLower(role)
-	if role == "boot" {
-		// Boot must execute triage immediately on spawn.
-		// For non-hook runtimes, do this explicitly instead of waiting for prompt parsing.
-		return []string{"gt prime && gt boot triage"}
+	rolePlan := config.StartupFallbackPlanForRole(role)
+	commandParts := make([]string, 0, 4)
+
+	if rolePlan.PrePrimeCommand != "" {
+		commandParts = append(commandParts, rolePlan.PrePrimeCommand)
 	}
 
-	command := "gt prime"
-	if role == "deacon" {
-		// Deacon heartbeat is required for daemon startup health checks.
-		// Without this, non-hook runtimes can sit idle at prompt and appear stuck.
-		command = "gt deacon heartbeat \"boot patrol\" && " + command
+	primeCommand := strings.TrimSpace(rolePlan.PrimeCommand)
+	if primeCommand == "" {
+		primeCommand = "gt prime"
 	}
-	if isAutonomousRole(role) {
-		command += " && gt mail check --inject"
+	commandParts = append(commandParts, primeCommand)
+
+	if rolePlan.AutoMailInject {
+		commandParts = append(commandParts, "gt mail check --inject")
 	}
+
+	if !capabilities.HasPrompt && rolePlan.PromptlessCommand != "" {
+		commandParts = append(commandParts, rolePlan.PromptlessCommand)
+	}
+
 	// NOTE: session-started nudge to deacon removed — it interrupted
 	// the deacon's await-signal backoff (exponential sleep). The deacon
 	// already wakes on beads activity via bd activity --follow.
 
-	return []string{command}
+	return []string{strings.Join(commandParts, " && ")}
 }
 
 // RunStartupFallback sends the startup fallback commands via tmux.
@@ -150,22 +168,6 @@ func RunStartupFallback(t *tmux.Tmux, sessionID, role string, rc *config.Runtime
 		ReadyDelayApplied:       true,
 	}, rc)
 	return ExecuteStartupBootstrapContract(t, sessionID, contract)
-}
-
-// isAutonomousRole returns true if the given role should automatically
-// inject mail check on startup. Autonomous roles (polecat, witness,
-// refinery, deacon, boot) operate without human prompting and need mail injection
-// to receive work assignments.
-//
-// Non-autonomous roles (mayor, crew) are human-guided and should not
-// have automatic mail injection to avoid confusion.
-func isAutonomousRole(role string) bool {
-	switch role {
-	case "polecat", "witness", "refinery", "deacon", "boot":
-		return true
-	default:
-		return false
-	}
 }
 
 // DefaultPrimeWaitMs is the default wait time in milliseconds for non-hook agents
@@ -364,26 +366,21 @@ func readyDelayDuration(rc *config.RuntimeConfig) time.Duration {
 
 // GetStartupFallbackInfo returns the fallback actions needed based on agent capabilities.
 func GetStartupFallbackInfo(rc *config.RuntimeConfig) *StartupFallbackInfo {
-	if rc == nil {
-		rc = config.DefaultRuntimeConfig()
-	}
-
-	hasHooks := rc.Hooks != nil && rc.Hooks.Provider != "" && rc.Hooks.Provider != "none" && !rc.Hooks.Informational
-	hasPrompt := rc.PromptMode != "none"
+	capabilities := resolveStartupCapabilities(rc)
 
 	info := &StartupFallbackInfo{}
 
-	if !hasHooks {
+	if !capabilities.HasHooks {
 		// Non-hook agents need to be told to run gt prime
 		info.IncludePrimeInBeacon = true
 		info.SendStartupNudge = true
 		info.StartupNudgeDelayMs = DefaultPrimeWaitMs
 
-		if !hasPrompt {
+		if !capabilities.HasPrompt {
 			// No prompt support - beacon must be sent via nudge
 			info.SendBeaconNudge = true
 		}
-	} else if !hasPrompt {
+	} else if !capabilities.HasPrompt {
 		// Has hooks but no prompt - need to nudge beacon + work instructions together
 		// Hook runs gt prime synchronously, so no wait needed
 		info.SendBeaconNudge = true

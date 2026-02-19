@@ -9,60 +9,60 @@ import (
 
 func TestLoadBuiltinRoleDefinition(t *testing.T) {
 	tests := []struct {
-		name          string
-		role          string
-		wantScope     string
-		wantPattern   string
-		wantPreSync   bool
+		name        string
+		role        string
+		wantScope   string
+		wantPattern string
+		wantPreSync bool
 	}{
 		{
-			name:          "mayor",
-			role:          "mayor",
-			wantScope:     "town",
-			wantPattern:   "hq-mayor",
-			wantPreSync:   false,
+			name:        "mayor",
+			role:        "mayor",
+			wantScope:   "town",
+			wantPattern: "hq-mayor",
+			wantPreSync: false,
 		},
 		{
-			name:          "deacon",
-			role:          "deacon",
-			wantScope:     "town",
-			wantPattern:   "hq-deacon",
-			wantPreSync:   false,
+			name:        "deacon",
+			role:        "deacon",
+			wantScope:   "town",
+			wantPattern: "hq-deacon",
+			wantPreSync: false,
 		},
 		{
-			name:          "witness",
-			role:          "witness",
-			wantScope:     "rig",
-			wantPattern:   "gt-{rig}-witness",
-			wantPreSync:   false,
+			name:        "witness",
+			role:        "witness",
+			wantScope:   "rig",
+			wantPattern: "gt-{rig}-witness",
+			wantPreSync: false,
 		},
 		{
-			name:          "refinery",
-			role:          "refinery",
-			wantScope:     "rig",
-			wantPattern:   "gt-{rig}-refinery",
-			wantPreSync:   true,
+			name:        "refinery",
+			role:        "refinery",
+			wantScope:   "rig",
+			wantPattern: "gt-{rig}-refinery",
+			wantPreSync: true,
 		},
 		{
-			name:          "polecat",
-			role:          "polecat",
-			wantScope:     "rig",
-			wantPattern:   "gt-{rig}-{name}",
-			wantPreSync:   true,
+			name:        "polecat",
+			role:        "polecat",
+			wantScope:   "rig",
+			wantPattern: "gt-{rig}-{name}",
+			wantPreSync: true,
 		},
 		{
-			name:          "crew",
-			role:          "crew",
-			wantScope:     "rig",
-			wantPattern:   "gt-{rig}-crew-{name}",
-			wantPreSync:   true,
+			name:        "crew",
+			role:        "crew",
+			wantScope:   "rig",
+			wantPattern: "gt-{rig}-crew-{name}",
+			wantPreSync: true,
 		},
 		{
-			name:          "dog",
-			role:          "dog",
-			wantScope:     "town",
-			wantPattern:   "gt-dog-{name}",
-			wantPreSync:   false,
+			name:        "dog",
+			role:        "dog",
+			wantScope:   "town",
+			wantPattern: "gt-dog-{name}",
+			wantPreSync: false,
 		},
 	}
 
@@ -169,6 +169,81 @@ func TestRigRoles(t *testing.T) {
 		if def.Scope != "rig" {
 			t.Errorf("role %s has scope %q, expected 'rig'", r, def.Scope)
 		}
+	}
+}
+
+func TestStartupFallbackPlanForRole(t *testing.T) {
+	tests := []struct {
+		name               string
+		role               string
+		wantPrePrime       string
+		wantPrime          string
+		wantAutoMailInject bool
+		wantPromptless     string
+	}{
+		{
+			name:               "deacon plan",
+			role:               "deacon",
+			wantPrePrime:       `gt deacon heartbeat "boot patrol"`,
+			wantPrime:          "gt prime",
+			wantAutoMailInject: true,
+			wantPromptless:     "gt hook",
+		},
+		{
+			name:               "boot plan",
+			role:               "boot",
+			wantPrime:          "gt prime && gt boot triage",
+			wantAutoMailInject: false,
+			wantPromptless:     "",
+		},
+		{
+			name:               "mayor plan",
+			role:               "mayor",
+			wantPrime:          "gt prime",
+			wantAutoMailInject: false,
+			wantPromptless:     "gt mail inbox && gt hook",
+		},
+		{
+			name:               "dog plan",
+			role:               "dog",
+			wantPrime:          "gt prime",
+			wantAutoMailInject: true,
+			wantPromptless:     "gt mail inbox",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := StartupFallbackPlanForRole(tt.role)
+			if plan.PrePrimeCommand != tt.wantPrePrime {
+				t.Errorf("PrePrimeCommand = %q, want %q", plan.PrePrimeCommand, tt.wantPrePrime)
+			}
+			if plan.PrimeCommand != tt.wantPrime {
+				t.Errorf("PrimeCommand = %q, want %q", plan.PrimeCommand, tt.wantPrime)
+			}
+			if plan.AutoMailInject != tt.wantAutoMailInject {
+				t.Errorf("AutoMailInject = %v, want %v", plan.AutoMailInject, tt.wantAutoMailInject)
+			}
+			if plan.PromptlessCommand != tt.wantPromptless {
+				t.Errorf("PromptlessCommand = %q, want %q", plan.PromptlessCommand, tt.wantPromptless)
+			}
+		})
+	}
+}
+
+func TestStartupFallbackPlanForRole_UnknownRole(t *testing.T) {
+	plan := StartupFallbackPlanForRole("custom-role")
+	if plan.PrimeCommand != "gt prime" {
+		t.Errorf("PrimeCommand = %q, want %q", plan.PrimeCommand, "gt prime")
+	}
+	if plan.AutoMailInject {
+		t.Error("AutoMailInject should be false for unknown role")
+	}
+	if plan.PrePrimeCommand != "" {
+		t.Errorf("PrePrimeCommand = %q, want empty", plan.PrePrimeCommand)
+	}
+	if plan.PromptlessCommand != "" {
+		t.Errorf("PromptlessCommand = %q, want empty", plan.PromptlessCommand)
 	}
 }
 
