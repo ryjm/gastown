@@ -37,6 +37,33 @@ func TestGetRoleConfigForIdentity_UsesBuiltinDefaults(t *testing.T) {
 	}
 }
 
+// TestGetRoleConfigForIdentity_TownRolesHaveNoBuiltinStartCommand verifies
+// town roles defer startup command resolution to runtime agent settings.
+func TestGetRoleConfigForIdentity_TownRolesHaveNoBuiltinStartCommand(t *testing.T) {
+	townRoot := t.TempDir()
+
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	for _, identity := range []string{"mayor", "deacon"} {
+		cfg, parsed, err := d.getRoleConfigForIdentity(identity)
+		if err != nil {
+			t.Fatalf("getRoleConfigForIdentity(%s): %v", identity, err)
+		}
+		if parsed == nil || parsed.RoleType != identity {
+			t.Fatalf("parsed(%s) = %#v, want roleType %q", identity, parsed, identity)
+		}
+		if cfg == nil {
+			t.Fatalf("cfg(%s) is nil, expected built-in defaults", identity)
+		}
+		if cfg.StartCommand != "" {
+			t.Errorf("cfg(%s).StartCommand = %q, want empty", identity, cfg.StartCommand)
+		}
+	}
+}
+
 // TestGetRoleConfigForIdentity_TownOverride tests that town-level TOML overrides
 // are merged with built-in defaults.
 func TestGetRoleConfigForIdentity_TownOverride(t *testing.T) {

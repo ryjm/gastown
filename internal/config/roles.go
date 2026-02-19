@@ -56,7 +56,7 @@ type RoleSessionConfig struct {
 	NeedsPreSync bool `toml:"needs_pre_sync"`
 
 	// StartCommand is the command to run after creating the session.
-	// Default: "exec claude --dangerously-skip-permissions"
+	// If empty, startup command is resolved dynamically from role/agent settings.
 	StartCommand string `toml:"start_command,omitempty"`
 }
 
