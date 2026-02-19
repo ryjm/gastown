@@ -458,6 +458,7 @@ func startConfiguredCrew(t *tmux.Tmux, rigs []*rig.Rig, townRoot string, mu *syn
 // it with fresh env vars and runtime settings.
 func startOrRestartCrewMember(t *tmux.Tmux, r *rig.Rig, crewName, townRoot string) (msg string, started bool) {
 	sessionID := crewSessionName(r.Name, crewName)
+	runtimeConfig := config.ResolveRoleAgentConfig("crew", townRoot, r.Path)
 	if running, _ := t.HasSession(sessionID); running {
 		// Session exists - check if agent is still alive
 		// Uses descendant process check instead of pane command check,
@@ -475,7 +476,11 @@ func startOrRestartCrewMember(t *tmux.Tmux, r *rig.Rig, crewName, townRoot strin
 			if err := t.SendKeys(sessionID, agentCmd); err != nil {
 				return fmt.Sprintf("  %s %s/%s restart failed: %v\n", style.Dim.Render("○"), r.Name, crewName, err), false
 			}
-			return fmt.Sprintf("  %s %s/%s agent restarted\n", style.Bold.Render("✓"), r.Name, crewName), true
+			restartMsg := fmt.Sprintf("  %s %s/%s agent restarted\n", style.Bold.Render("✓"), r.Name, crewName)
+			if err := runRespawnStartupBootstrap(t, sessionID, "crew", runtimeConfig); err != nil {
+				restartMsg += fmt.Sprintf("  %s %s/%s startup bootstrap fallback warning: %v\n", style.Dim.Render("○"), r.Name, crewName, err)
+			}
+			return restartMsg, true
 		}
 		// Agent is alive — nothing to do
 		return fmt.Sprintf("  %s %s/%s already running\n", style.Dim.Render("○"), r.Name, crewName), false

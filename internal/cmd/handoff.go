@@ -182,10 +182,14 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	bootstrapRole, bootstrapRuntimeConfig, bootstrapErr := runtimeConfigForSessionStartupBootstrap(targetSession, detectTownRootFromCwd())
+	if bootstrapErr != nil {
+		style.PrintWarning("could not resolve startup bootstrap config for %s: %v", targetSession, bootstrapErr)
+	}
 
 	// If handing off a different session, we need to find its pane and respawn there
 	if targetSession != currentSession {
-		return handoffRemoteSession(t, targetSession, restartCmd)
+		return handoffRemoteSession(t, targetSession, restartCmd, bootstrapRole, bootstrapRuntimeConfig)
 	}
 
 	// Handing off ourselves - print feedback then respawn
@@ -247,6 +251,11 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// we can respawn it. This is essential for tmux session reuse.
 	if err := t.SetRemainOnExit(pane, true); err != nil {
 		style.PrintWarning("could not set remain-on-exit: %v", err)
+	}
+	if bootstrapErr == nil {
+		if err := scheduleRespawnStartupBootstrap(currentSession, bootstrapRole, bootstrapRuntimeConfig); err != nil {
+			style.PrintWarning("could not schedule startup bootstrap fallback: %v", err)
+		}
 	}
 
 	// NOTE: For self-handoff, we do NOT call KillPaneProcesses here.
@@ -689,7 +698,7 @@ func detectTownRootFromCwd() string {
 }
 
 // handoffRemoteSession respawns a different session and optionally switches to it.
-func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd string) error {
+func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd, bootstrapRole string, bootstrapRuntimeConfig *config.RuntimeConfig) error {
 	// Check if target session exists
 	exists, err := t.HasSession(targetSession)
 	if err != nil {
@@ -752,6 +761,11 @@ func handoffRemoteSession(t *tmux.Tmux, targetSession, restartCmd string) error 
 	}()
 	if respawnErr != nil {
 		return fmt.Errorf("respawning pane: %w", respawnErr)
+	}
+	if bootstrapRole != "" && bootstrapRuntimeConfig != nil {
+		if err := runRespawnStartupBootstrap(t, targetSession, bootstrapRole, bootstrapRuntimeConfig); err != nil {
+			style.PrintWarning("could not run startup bootstrap fallback for %s: %v", targetSession, err)
+		}
 	}
 
 	// If --watch, switch to that session

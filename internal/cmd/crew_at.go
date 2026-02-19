@@ -253,6 +253,9 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		if err := t.RespawnPane(paneID, startupCmd); err != nil {
 			return fmt.Errorf("starting runtime: %w", err)
 		}
+		if err := runRespawnStartupBootstrap(t, sessionID, "crew", runtimeConfig); err != nil {
+			style.PrintWarning("could not run startup bootstrap fallback for %s/%s: %v", r.Name, name, err)
+		}
 
 		fmt.Printf("%s Created session for %s/%s\n",
 			style.Bold.Render("✓"), r.Name, name)
@@ -311,6 +314,9 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 					return runCrewAt(cmd, args) // Retry with fresh session
 				}
 				return fmt.Errorf("restarting runtime: %w", err)
+			}
+			if err := runRespawnStartupBootstrap(t, sessionID, "crew", runtimeConfig); err != nil {
+				style.PrintWarning("could not run startup bootstrap fallback for %s/%s: %v", r.Name, name, err)
 			}
 		}
 	}
