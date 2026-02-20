@@ -35,6 +35,35 @@ func (d *Doctor) Checks() []Check {
 	return d.checks
 }
 
+// runChecks returns the effective check list for a doctor run.
+// Registration for non-hook startup parity is wired here (rather than cmd/doctor)
+// so command registration logic stays centralized in the doctor package.
+func (d *Doctor) runChecks() []Check {
+	if !d.shouldAppendNonHookStartupParityCheck() {
+		return d.checks
+	}
+
+	effective := make([]Check, 0, len(d.checks)+1)
+	effective = append(effective, d.checks...)
+	effective = append(effective, NewNonHookStartupParityCheck())
+	return effective
+}
+
+func (d *Doctor) shouldAppendNonHookStartupParityCheck() bool {
+	hasGlobalState := false
+
+	for _, check := range d.checks {
+		switch check.Name() {
+		case "non-hook-startup-parity":
+			return false
+		case "global-state":
+			hasGlobalState = true
+		}
+	}
+
+	return hasGlobalState
+}
+
 // categoryGetter interface for checks that provide a category
 type categoryGetter interface {
 	Category() string
@@ -51,7 +80,7 @@ func (d *Doctor) Run(ctx *CheckContext) *Report {
 func (d *Doctor) RunStreaming(ctx *CheckContext, w io.Writer, slowThreshold time.Duration) *Report {
 	report := NewReport()
 
-	for _, check := range d.checks {
+	for _, check := range d.runChecks() {
 		// Stream: print check name before running
 		if w != nil {
 			fmt.Fprintf(w, "  %s  %s...", ui.RenderMuted("○"), check.Name())
@@ -116,7 +145,7 @@ func (d *Doctor) Fix(ctx *CheckContext) *Report {
 func (d *Doctor) FixStreaming(ctx *CheckContext, w io.Writer, slowThreshold time.Duration) *Report {
 	report := NewReport()
 
-	for _, check := range d.checks {
+	for _, check := range d.runChecks() {
 		// Stream: print check name before running
 		if w != nil {
 			fmt.Fprintf(w, "  %s  %s...", ui.RenderMuted("○"), check.Name())
