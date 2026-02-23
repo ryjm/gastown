@@ -9,60 +9,65 @@ import (
 
 func TestLoadBuiltinRoleDefinition(t *testing.T) {
 	tests := []struct {
-		name          string
-		role          string
-		wantScope     string
-		wantPattern   string
-		wantPreSync   bool
+		name        string
+		role        string
+		wantScope   string
+		wantPattern string
+		wantPreSync bool
+		wantNoStart bool
 	}{
 		{
-			name:          "mayor",
-			role:          "mayor",
-			wantScope:     "town",
-			wantPattern:   "hq-mayor",
-			wantPreSync:   false,
+			name:        "mayor",
+			role:        "mayor",
+			wantScope:   "town",
+			wantPattern: "hq-mayor",
+			wantPreSync: false,
 		},
 		{
-			name:          "deacon",
-			role:          "deacon",
-			wantScope:     "town",
-			wantPattern:   "hq-deacon",
-			wantPreSync:   false,
+			name:        "deacon",
+			role:        "deacon",
+			wantScope:   "town",
+			wantPattern: "hq-deacon",
+			wantPreSync: false,
 		},
 		{
-			name:          "witness",
-			role:          "witness",
-			wantScope:     "rig",
-			wantPattern:   "gt-{rig}-witness",
-			wantPreSync:   false,
+			name:        "witness",
+			role:        "witness",
+			wantScope:   "rig",
+			wantPattern: "gt-{rig}-witness",
+			wantPreSync: false,
+			wantNoStart: true,
 		},
 		{
-			name:          "refinery",
-			role:          "refinery",
-			wantScope:     "rig",
-			wantPattern:   "gt-{rig}-refinery",
-			wantPreSync:   true,
+			name:        "refinery",
+			role:        "refinery",
+			wantScope:   "rig",
+			wantPattern: "gt-{rig}-refinery",
+			wantPreSync: true,
+			wantNoStart: true,
 		},
 		{
-			name:          "polecat",
-			role:          "polecat",
-			wantScope:     "rig",
-			wantPattern:   "gt-{rig}-{name}",
-			wantPreSync:   true,
+			name:        "polecat",
+			role:        "polecat",
+			wantScope:   "rig",
+			wantPattern: "gt-{rig}-{name}",
+			wantPreSync: true,
+			wantNoStart: true,
 		},
 		{
-			name:          "crew",
-			role:          "crew",
-			wantScope:     "rig",
-			wantPattern:   "gt-{rig}-crew-{name}",
-			wantPreSync:   true,
+			name:        "crew",
+			role:        "crew",
+			wantScope:   "rig",
+			wantPattern: "gt-{rig}-crew-{name}",
+			wantPreSync: true,
+			wantNoStart: true,
 		},
 		{
-			name:          "dog",
-			role:          "dog",
-			wantScope:     "town",
-			wantPattern:   "gt-dog-{name}",
-			wantPreSync:   false,
+			name:        "dog",
+			role:        "dog",
+			wantScope:   "town",
+			wantPattern: "gt-dog-{name}",
+			wantPreSync: false,
 		},
 	}
 
@@ -84,6 +89,9 @@ func TestLoadBuiltinRoleDefinition(t *testing.T) {
 			}
 			if def.Session.NeedsPreSync != tt.wantPreSync {
 				t.Errorf("Session.NeedsPreSync = %v, want %v", def.Session.NeedsPreSync, tt.wantPreSync)
+			}
+			if tt.wantNoStart && def.Session.StartCommand != "" {
+				t.Errorf("Session.StartCommand = %q, want empty for rig default", def.Session.StartCommand)
 			}
 
 			// Verify health config has reasonable defaults

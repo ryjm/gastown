@@ -35,6 +35,10 @@ func TestGetRoleConfigForIdentity_UsesBuiltinDefaults(t *testing.T) {
 	if cfg.SessionPattern != "gt-{rig}-witness" {
 		t.Errorf("cfg.SessionPattern = %q, want %q", cfg.SessionPattern, "gt-{rig}-witness")
 	}
+	// Built-in rig roles should not hardcode Claude startup command.
+	if cfg.StartCommand != "" {
+		t.Errorf("cfg.StartCommand = %q, want empty", cfg.StartCommand)
+	}
 }
 
 // TestGetRoleConfigForIdentity_TownOverride tests that town-level TOML overrides
