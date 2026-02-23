@@ -6,7 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // testDaemon creates a minimal Daemon for testing.
@@ -228,6 +231,107 @@ func TestIdentityToSession_Unknown(t *testing.T) {
 		if result != "" {
 			t.Errorf("identityToSession(%q) = %q, expected empty string", identity, result)
 		}
+	}
+}
+
+func TestGetStartCommand_UsesRuntimeRoleAgentWhenStartCommandNotExplicit(t *testing.T) {
+	townRoot := t.TempDir()
+
+	townSettings := config.NewTownSettings()
+	townSettings.DefaultAgent = "claude"
+	townSettings.RoleAgents = map[string]string{
+		"witness": "codex",
+	}
+	townSettings.Agents = map[string]*config.RuntimeConfig{
+		"codex": {
+			Provider: "codex",
+			Command:  "codex-custom",
+			Args:     []string{"--test-flag"},
+		},
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	roleCfg, parsed, err := d.getRoleConfigForIdentity("myrig-witness")
+	if err != nil {
+		t.Fatalf("getRoleConfigForIdentity: %v", err)
+	}
+	if parsed == nil {
+		t.Fatal("parsed identity is nil")
+	}
+	if parsed.HasExplicitStartCommand {
+		t.Fatal("parsed.HasExplicitStartCommand = true, want false for built-in default")
+	}
+
+	cmd := d.getStartCommand(roleCfg, parsed)
+	if !strings.Contains(cmd, "codex-custom --test-flag") {
+		t.Fatalf("getStartCommand() = %q, want runtime role-agent command containing codex-custom --test-flag", cmd)
+	}
+	if strings.Contains(cmd, "claude --dangerously-skip-permissions") {
+		t.Fatalf("getStartCommand() = %q, did not expect built-in claude start_command to take precedence", cmd)
+	}
+}
+
+func TestGetStartCommand_PreservesExplicitStartCommandOverride(t *testing.T) {
+	townRoot := t.TempDir()
+
+	// Configure role_agents to codex so we can verify explicit start_command still wins.
+	townSettings := config.NewTownSettings()
+	townSettings.DefaultAgent = "claude"
+	townSettings.RoleAgents = map[string]string{
+		"witness": "codex",
+	}
+	townSettings.Agents = map[string]*config.RuntimeConfig{
+		"codex": {
+			Provider: "codex",
+			Command:  "codex-custom",
+			Args:     []string{"--test-flag"},
+		},
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+
+	rolesDir := filepath.Join(townRoot, "roles")
+	if err := os.MkdirAll(rolesDir, 0755); err != nil {
+		t.Fatalf("mkdir roles: %v", err)
+	}
+	override := `
+[session]
+start_command = "exec echo explicit-start-command"
+`
+	if err := os.WriteFile(filepath.Join(rolesDir, "witness.toml"), []byte(override), 0644); err != nil {
+		t.Fatalf("write witness.toml: %v", err)
+	}
+
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	roleCfg, parsed, err := d.getRoleConfigForIdentity("myrig-witness")
+	if err != nil {
+		t.Fatalf("getRoleConfigForIdentity: %v", err)
+	}
+	if parsed == nil {
+		t.Fatal("parsed identity is nil")
+	}
+	if !parsed.HasExplicitStartCommand {
+		t.Fatal("parsed.HasExplicitStartCommand = false, want true for explicit override")
+	}
+
+	cmd := d.getStartCommand(roleCfg, parsed)
+	if cmd != "exec echo explicit-start-command" {
+		t.Fatalf("getStartCommand() = %q, want explicit override start command", cmd)
+	}
+	if strings.Contains(cmd, "codex-custom") {
+		t.Fatalf("getStartCommand() = %q, expected explicit override to beat runtime role-agent resolution", cmd)
 	}
 }
 

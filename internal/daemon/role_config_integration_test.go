@@ -28,6 +28,9 @@ func TestGetRoleConfigForIdentity_UsesBuiltinDefaults(t *testing.T) {
 	if parsed == nil || parsed.RoleType != "witness" {
 		t.Fatalf("parsed = %#v, want roleType witness", parsed)
 	}
+	if parsed.HasExplicitStartCommand {
+		t.Fatalf("parsed.HasExplicitStartCommand = true, want false for built-in defaults")
+	}
 	if cfg == nil {
 		t.Fatal("cfg is nil, expected built-in defaults")
 	}
@@ -71,6 +74,9 @@ start_command = "exec echo custom-town-command"
 	}
 	if parsed == nil || parsed.RoleType != "witness" {
 		t.Fatalf("parsed = %#v, want roleType witness", parsed)
+	}
+	if !parsed.HasExplicitStartCommand {
+		t.Fatalf("parsed.HasExplicitStartCommand = false, want true for town override")
 	}
 	if cfg == nil {
 		t.Fatal("cfg is nil")
@@ -134,6 +140,9 @@ start_command = "exec echo rig-command"
 	}
 	if parsed == nil || parsed.RoleType != "witness" {
 		t.Fatalf("parsed = %#v, want roleType witness", parsed)
+	}
+	if !parsed.HasExplicitStartCommand {
+		t.Fatalf("parsed.HasExplicitStartCommand = false, want true for rig override")
 	}
 	if cfg == nil {
 		t.Fatal("cfg is nil")
