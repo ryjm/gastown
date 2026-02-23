@@ -151,6 +151,14 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (*StartResult, error) {
 
 	// 1. Resolve runtime config.
 	runtimeConfig := config.ResolveRoleAgentConfig(cfg.Role, cfg.TownRoot, cfg.RigPath)
+	fallbackRole := startupFallbackRole(cfg)
+	var fallbackInfo *runtime.StartupFallbackInfo
+	startupNudgeCommands := []string(nil)
+	if cfg.RunStartupFallback {
+		fallbackInfo = runtime.GetStartupFallbackInfoForRole(fallbackRole, runtimeConfig)
+		cfg.Beacon = applyStartupFallbackToBeacon(cfg.Beacon, fallbackInfo)
+		startupNudgeCommands = runtime.StartupNudgeCommands(fallbackRole, runtimeConfig)
+	}
 
 	// 2. Ensure settings/plugins exist for the agent.
 	settingsDir := config.RoleSettingsDir(cfg.Role, cfg.RigPath)
@@ -163,13 +171,17 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (*StartResult, error) {
 
 	// 3. Build startup command if not provided.
 	command := cfg.Command
+	startupPrompt := ""
 	if command == "" {
-		prompt := buildPrompt(cfg)
+		startupPrompt = buildPrompt(cfg)
 		var err error
-		command, err = buildCommand(cfg, prompt)
+		command, err = buildCommand(cfg, startupPrompt)
 		if err != nil {
 			return nil, fmt.Errorf("building startup command: %w", err)
 		}
+	}
+	if startupPrompt == "" && cfg.RunStartupFallback && fallbackInfo != nil && fallbackInfo.SendBeaconNudge {
+		startupPrompt = buildPrompt(cfg)
 	}
 
 	// Prepend runtime config dir env if needed.
@@ -241,20 +253,24 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (*StartResult, error) {
 		runtime.SleepForReadyDelay(runtimeConfig)
 	}
 
-	// 12. Non-hook startup fallback for prompt-less runtimes (codex, etc.).
-	if cfg.RunStartupFallback {
-		fallbackRole := cfg.StartupFallbackRole
-		if fallbackRole == "" {
-			fallbackRole = cfg.Role
+	// 12. Role-aware startup fallback nudge delivery and sequencing.
+	if cfg.RunStartupFallback && fallbackInfo != nil {
+		// If caller did not explicitly request ready delay, still wait before nudging.
+		// Prompt-less runtimes need this for reliable startup command delivery.
+		if !cfg.ReadyDelay {
+			runtime.SleepForReadyDelay(runtimeConfig)
 		}
-		commands := runtime.StartupFallbackCommands(fallbackRole, runtimeConfig)
-		if len(commands) > 0 {
-			// If caller did not explicitly request ready delay, still wait before nudging.
-			// Prompt-less runtimes need this for reliable startup command delivery.
-			if !cfg.ReadyDelay {
-				runtime.SleepForReadyDelay(runtimeConfig)
+		sequence := buildStartupNudgeSequence(startupPrompt, fallbackInfo, startupNudgeCommands)
+		if sequence.CombineNudges {
+			_ = t.NudgeSession(cfg.SessionID, BuildStartupNudgeMessage(sequence.Beacon, sequence.StartupCommands))
+		} else {
+			if sequence.SendBeacon {
+				_ = t.NudgeSession(cfg.SessionID, sequence.Beacon)
 			}
-			for _, command := range commands {
+			if sequence.StartupDelayMs > 0 {
+				time.Sleep(time.Duration(sequence.StartupDelayMs) * time.Millisecond)
+			}
+			for _, command := range sequence.StartupCommands {
 				_ = t.NudgeSession(cfg.SessionID, command)
 			}
 		}
@@ -361,4 +377,49 @@ func ReadyDelay(rc *config.RuntimeConfig) {
 // Some roles use this instead of the runtime's ready delay.
 func ShutdownDelay() time.Duration {
 	return constants.ShutdownNotifyDelay
+}
+
+func startupFallbackRole(cfg SessionConfig) string {
+	if cfg.StartupFallbackRole != "" {
+		return cfg.StartupFallbackRole
+	}
+	return cfg.Role
+}
+
+func applyStartupFallbackToBeacon(cfg BeaconConfig, info *runtime.StartupFallbackInfo) BeaconConfig {
+	if info == nil {
+		return cfg
+	}
+	cfg.IncludePrimeInstruction = cfg.IncludePrimeInstruction || info.IncludePrimeInBeacon
+	cfg.ExcludeWorkInstructions = cfg.ExcludeWorkInstructions || info.SendStartupNudge
+	return cfg
+}
+
+type startupNudgeSequence struct {
+	SendBeacon      bool
+	Beacon          string
+	StartupDelayMs  int
+	StartupCommands []string
+	CombineNudges   bool
+}
+
+func buildStartupNudgeSequence(beacon string, info *runtime.StartupFallbackInfo, commands []string) startupNudgeSequence {
+	sequence := startupNudgeSequence{}
+	if info == nil {
+		return sequence
+	}
+
+	sequence.SendBeacon = info.SendBeaconNudge && beacon != ""
+	sequence.Beacon = beacon
+	sequence.StartupDelayMs = info.StartupNudgeDelayMs
+
+	if info.SendStartupNudge {
+		sequence.StartupCommands = append(sequence.StartupCommands, commands...)
+		if len(sequence.StartupCommands) == 0 {
+			sequence.StartupCommands = append(sequence.StartupCommands, runtime.StartupNudgeContent())
+		}
+	}
+
+	sequence.CombineNudges = sequence.SendBeacon && len(sequence.StartupCommands) > 0 && sequence.StartupDelayMs == 0
+	return sequence
 }

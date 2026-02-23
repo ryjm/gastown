@@ -108,12 +108,20 @@ func SleepForReadyDelay(rc *config.RuntimeConfig) {
 	time.Sleep(time.Duration(rc.Tmux.ReadyDelayMs) * time.Millisecond)
 }
 
+func hasExecutableHooks(rc *config.RuntimeConfig) bool {
+	return rc != nil &&
+		rc.Hooks != nil &&
+		rc.Hooks.Provider != "" &&
+		rc.Hooks.Provider != "none" &&
+		!rc.Hooks.Informational
+}
+
 // StartupFallbackCommands returns commands that approximate Claude hooks when hooks are unavailable.
 func StartupFallbackCommands(role string, rc *config.RuntimeConfig) []string {
 	if rc == nil {
 		rc = config.DefaultRuntimeConfig()
 	}
-	if rc.Hooks != nil && rc.Hooks.Provider != "" && rc.Hooks.Provider != "none" && !rc.Hooks.Informational {
+	if hasExecutableHooks(rc) {
 		return nil
 	}
 
@@ -202,11 +210,17 @@ type StartupFallbackInfo struct {
 
 // GetStartupFallbackInfo returns the fallback actions needed based on agent capabilities.
 func GetStartupFallbackInfo(rc *config.RuntimeConfig) *StartupFallbackInfo {
+	return GetStartupFallbackInfoForRole("", rc)
+}
+
+// GetStartupFallbackInfoForRole returns fallback actions needed for startup.
+// Role is used to resolve role-aware startup commands for non-hook runtimes.
+func GetStartupFallbackInfoForRole(role string, rc *config.RuntimeConfig) *StartupFallbackInfo {
 	if rc == nil {
 		rc = config.DefaultRuntimeConfig()
 	}
 
-	hasHooks := rc.Hooks != nil && rc.Hooks.Provider != "" && rc.Hooks.Provider != "none" && !rc.Hooks.Informational
+	hasHooks := hasExecutableHooks(rc)
 	hasPrompt := rc.PromptMode != "none"
 
 	info := &StartupFallbackInfo{}
@@ -231,6 +245,19 @@ func GetStartupFallbackInfo(rc *config.RuntimeConfig) *StartupFallbackInfo {
 	// else: hooks + prompt - nothing needed, all in CLI prompt + hook
 
 	return info
+}
+
+// StartupNudgeCommands returns role-aware startup nudge commands for the current runtime capabilities.
+func StartupNudgeCommands(role string, rc *config.RuntimeConfig) []string {
+	commands := StartupFallbackCommands(role, rc)
+	if len(commands) > 0 {
+		return commands
+	}
+	info := GetStartupFallbackInfoForRole(role, rc)
+	if info.SendStartupNudge {
+		return []string{StartupNudgeContent()}
+	}
+	return nil
 }
 
 // StartupNudgeContent returns the work instructions to send as a startup nudge.

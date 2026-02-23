@@ -7,10 +7,10 @@ import (
 
 func TestFormatStartupBeacon(t *testing.T) {
 	tests := []struct {
-		name     string
-		cfg      BeaconConfig
-		wantSub  []string // substrings that must appear
-		wantNot  []string // substrings that must NOT appear
+		name    string
+		cfg     BeaconConfig
+		wantSub []string // substrings that must appear
+		wantNot []string // substrings that must NOT appear
 	}{
 		{
 			name: "assigned with mol-id",
@@ -26,7 +26,7 @@ func TestFormatStartupBeacon(t *testing.T) {
 				"<- deacon",
 				"assigned:gt-abc12",
 				"gt prime --hook", // prime before anything else
-				"begin work",     // then work on hook
+				"begin work",      // then work on hook
 			},
 		},
 		{
@@ -176,5 +176,48 @@ func TestBuildStartupPrompt(t *testing.T) {
 	// Should have blank line between beacon and instructions
 	if !strings.Contains(got, "\n\n"+instructions) {
 		t.Errorf("BuildStartupPrompt() missing blank line before instructions")
+	}
+}
+
+func TestBuildStartupNudgeMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		beacon   string
+		commands []string
+		want     string
+	}{
+		{
+			name:     "beacon and commands",
+			beacon:   "beacon",
+			commands: []string{"cmd1", "cmd2"},
+			want:     "beacon\n\ncmd1\n\ncmd2",
+		},
+		{
+			name:     "empty command entries ignored",
+			beacon:   "beacon",
+			commands: []string{"", "   ", "cmd"},
+			want:     "beacon\n\ncmd",
+		},
+		{
+			name:     "no beacon",
+			beacon:   "",
+			commands: []string{"cmd1", "cmd2"},
+			want:     "cmd1\n\ncmd2",
+		},
+		{
+			name:     "no content",
+			beacon:   "",
+			commands: nil,
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildStartupNudgeMessage(tt.beacon, tt.commands)
+			if got != tt.want {
+				t.Errorf("BuildStartupNudgeMessage() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

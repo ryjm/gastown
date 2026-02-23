@@ -293,6 +293,53 @@ func TestStartupFallbackCommands_RoleCasing(t *testing.T) {
 	}
 }
 
+func TestStartupNudgeCommands_NoHooksUsesRolePlan(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+	}
+
+	commands := StartupNudgeCommands("deacon", rc)
+	if len(commands) == 0 {
+		t.Fatal("StartupNudgeCommands() should return commands for non-hook runtime")
+	}
+	if !contains(commands[0], "gt deacon heartbeat") {
+		t.Fatalf("expected role-aware deacon command, got %q", commands[0])
+	}
+}
+
+func TestStartupNudgeCommands_HooksNoPromptUsesInstructionNudge(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		PromptMode: "none",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "claude",
+		},
+	}
+
+	commands := StartupNudgeCommands("polecat", rc)
+	if len(commands) != 1 {
+		t.Fatalf("StartupNudgeCommands() should return single startup instruction nudge, got %d", len(commands))
+	}
+	if commands[0] != StartupNudgeContent() {
+		t.Fatalf("StartupNudgeCommands() = %q, want %q", commands[0], StartupNudgeContent())
+	}
+}
+
+func TestStartupNudgeCommands_HooksWithPromptReturnsNil(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		PromptMode: "arg",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "claude",
+		},
+	}
+
+	commands := StartupNudgeCommands("polecat", rc)
+	if commands != nil {
+		t.Fatalf("StartupNudgeCommands() with hooks+prompt should return nil, got %v", commands)
+	}
+}
+
 func TestEnsureSettingsForRole_NilConfig(t *testing.T) {
 	// Should not panic with nil config
 	err := EnsureSettingsForRole("/tmp/test", "/tmp/test", "polecat", nil)

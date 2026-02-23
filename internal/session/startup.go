@@ -2,9 +2,11 @@
 package session
 
 import (
-	"github.com/steveyegge/gastown/internal/cli"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/cli"
 )
 
 // BeaconConfig configures a startup beacon message.
@@ -109,4 +111,20 @@ func FormatStartupBeacon(cfg BeaconConfig) string {
 // so no separate propulsion nudge is needed.
 func BuildStartupPrompt(cfg BeaconConfig, instructions string) string {
 	return FormatStartupBeacon(cfg) + "\n\n" + instructions
+}
+
+// BuildStartupNudgeMessage combines a beacon and startup command nudges into one message.
+// Empty parts are skipped.
+func BuildStartupNudgeMessage(beacon string, startupCommands []string) string {
+	parts := make([]string, 0, 1+len(startupCommands))
+	if strings.TrimSpace(beacon) != "" {
+		parts = append(parts, beacon)
+	}
+	for _, command := range startupCommands {
+		if strings.TrimSpace(command) == "" {
+			continue
+		}
+		parts = append(parts, command)
+	}
+	return strings.Join(parts, "\n\n")
 }
