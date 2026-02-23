@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -228,6 +229,10 @@ type ParsedIdentity struct {
 	RoleType  string // mayor, deacon, witness, refinery, crew, polecat
 	RigName   string // Empty for town-level agents (mayor, deacon)
 	AgentName string // Empty for singletons (mayor, deacon, witness, refinery)
+
+	// HasExplicitStartCommand is true when a user role override file (town or rig)
+	// explicitly defines [session].start_command. Built-in defaults do not set this.
+	HasExplicitStartCommand bool
 }
 
 // parseIdentity extracts role type, rig name, and agent name from an identity string.
@@ -289,6 +294,8 @@ func (d *Daemon) getRoleConfigForIdentity(identity string) (*beads.RoleConfig, *
 		return nil, nil, err
 	}
 
+	parsed.HasExplicitStartCommand = d.hasExplicitStartCommandOverride(parsed)
+
 	// Determine rig path for rig-scoped roles
 	rigPath := ""
 	if parsed.RigName != "" {
@@ -313,6 +320,51 @@ func (d *Daemon) getRoleConfigForIdentity(identity string) (*beads.RoleConfig, *
 	}
 
 	return roleConfig, parsed, nil
+}
+
+// hasExplicitStartCommandOverride checks whether town/rig role override files
+// explicitly set [session].start_command for the parsed role identity.
+func (d *Daemon) hasExplicitStartCommandOverride(parsed *ParsedIdentity) bool {
+	if parsed == nil || parsed.RoleType == "" {
+		return false
+	}
+
+	townRolePath := filepath.Join(d.config.TownRoot, "roles", parsed.RoleType+".toml")
+	townHasStartCommand, err := roleFileDefinesStartCommand(townRolePath)
+	if err != nil {
+		d.logger.Printf("Warning: failed checking town role override %s: %v", townRolePath, err)
+	}
+
+	rigHasStartCommand := false
+	if parsed.RigName != "" {
+		rigRolePath := filepath.Join(d.config.TownRoot, parsed.RigName, "roles", parsed.RoleType+".toml")
+		rigHasStartCommand, err = roleFileDefinesStartCommand(rigRolePath)
+		if err != nil {
+			d.logger.Printf("Warning: failed checking rig role override %s: %v", rigRolePath, err)
+		}
+	}
+
+	return townHasStartCommand || rigHasStartCommand
+}
+
+// roleFileDefinesStartCommand returns true when the TOML file explicitly defines
+// [session].start_command. Missing files are not treated as errors.
+func roleFileDefinesStartCommand(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading file: %w", err)
+	}
+
+	var decoded struct{}
+	meta, err := toml.Decode(string(data), &decoded)
+	if err != nil {
+		return false, fmt.Errorf("parsing TOML: %w", err)
+	}
+
+	return meta.IsDefined("session", "start_command"), nil
 }
 
 // identityToSession converts a beads identity to a tmux session name.
@@ -495,8 +547,14 @@ func (d *Daemon) getNeedsPreSync(config *beads.RoleConfig, parsed *ParsedIdentit
 // Uses role config if available, then role-based agent selection, then hardcoded defaults.
 // Includes beacon + role-specific instructions in the CLI prompt.
 func (d *Daemon) getStartCommand(roleConfig *beads.RoleConfig, parsed *ParsedIdentity) string {
-	// If role config is available, use it
-	if roleConfig != nil && roleConfig.StartCommand != "" {
+	// Precedence order:
+	// 1) Explicit user override via town/rig [session].start_command.
+	// 2) Role-based runtime agent resolution (role_agents/default_agent/runtime).
+	// 3) Runtime hard fallback in ResolveRoleAgentConfig (ultimately claude defaults).
+	//
+	// Built-in role defaults must not force command selection, otherwise they
+	// override runtime role agent settings and regress non-Claude role routing.
+	if roleConfig != nil && parsed != nil && parsed.HasExplicitStartCommand && roleConfig.StartCommand != "" {
 		// Expand any patterns in the command
 		return beads.ExpandRolePattern(roleConfig.StartCommand, d.config.TownRoot, parsed.RigName, parsed.AgentName, parsed.RoleType)
 	}
