@@ -38,12 +38,54 @@ func TestParseRoleStringBoot(t *testing.T) {
 	}
 }
 
+func TestParseRoleStringDog(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantRole Role
+		wantRig  string
+		wantName string
+	}{
+		// Simple "dog" -> RoleDog
+		{"dog", RoleDog, "", ""},
+		// Compound "deacon/dogs/<name>" -> RoleDog
+		{"deacon/dogs/alpha", RoleDog, "", "alpha"},
+		// Dog vs boot separation: dog identity for boot name is still dog role
+		{"deacon/dogs/boot", RoleDog, "", "boot"},
+		// Boot role stays distinct
+		{"deacon/boot", RoleBoot, "", ""},
+		// Non-deacon dog path should not match RoleDog
+		{"west/dogs/alpha", Role("west/dogs/alpha"), "", ""},
+	}
+
+	for _, tt := range tests {
+		role, rig, name := parseRoleString(tt.input)
+		if role != tt.wantRole {
+			t.Errorf("parseRoleString(%q) role = %v, want %v", tt.input, role, tt.wantRole)
+		}
+		if rig != tt.wantRig {
+			t.Errorf("parseRoleString(%q) rig = %q, want %q", tt.input, rig, tt.wantRig)
+		}
+		if name != tt.wantName {
+			t.Errorf("parseRoleString(%q) name = %q, want %q", tt.input, name, tt.wantName)
+		}
+	}
+}
+
 func TestGetRoleHomeBoot(t *testing.T) {
 	townRoot := "/tmp/gt"
 	got := getRoleHome(RoleBoot, "", "", townRoot)
 	want := filepath.Join(townRoot, "deacon", "dogs", "boot")
 	if got != want {
 		t.Errorf("getRoleHome(RoleBoot) = %q, want %q", got, want)
+	}
+}
+
+func TestGetRoleHomeDog(t *testing.T) {
+	townRoot := "/tmp/gt"
+	got := getRoleHome(RoleDog, "", "alpha", townRoot)
+	want := filepath.Join(townRoot, "deacon", "dogs", "alpha")
+	if got != want {
+		t.Errorf("getRoleHome(RoleDog) = %q, want %q", got, want)
 	}
 }
 
@@ -61,6 +103,25 @@ func TestIsTownLevelRoleBoot(t *testing.T) {
 		{"gastown/witness", false},
 		{"west/boot", false},
 		{"boot", false}, // bare "boot" is not a valid agentID
+	}
+
+	for _, tt := range tests {
+		got := isTownLevelRole(tt.agentID)
+		if got != tt.want {
+			t.Errorf("isTownLevelRole(%q) = %v, want %v", tt.agentID, got, tt.want)
+		}
+	}
+}
+
+func TestIsTownLevelRoleDog(t *testing.T) {
+	tests := []struct {
+		agentID string
+		want    bool
+	}{
+		{"deacon/dogs/alpha", true},
+		{"deacon/dogs/boot", true},
+		{"deacon/dogs/alpha/extra", false},
+		{"dog", false},
 	}
 
 	for _, tt := range tests {
@@ -92,6 +153,15 @@ func TestActorStringConsistentWithBDActorBoot(t *testing.T) {
 	}
 }
 
+func TestActorStringDog(t *testing.T) {
+	info := RoleInfo{Role: RoleDog, Polecat: "alpha"}
+	got := info.ActorString()
+	want := "deacon/dogs/alpha"
+	if got != want {
+		t.Errorf("ActorString() for RoleDog = %q, want %q", got, want)
+	}
+}
+
 func TestBuildAgentBeadIDBoot(t *testing.T) {
 	// RoleBoot should produce the town-level dog bead ID "hq-dog-boot"
 	// via both the explicit role path and the identity-inference path.
@@ -107,5 +177,21 @@ func TestBuildAgentBeadIDBoot(t *testing.T) {
 	got = buildAgentBeadID("deacon-boot", RoleUnknown, "/tmp/gt")
 	if got != want {
 		t.Errorf("buildAgentBeadID(RoleUnknown, \"deacon-boot\") = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAgentBeadIDDog(t *testing.T) {
+	want := beads.DogBeadIDTown("alpha")
+
+	// Explicit role path
+	got := buildAgentBeadID("deacon/dogs/alpha", RoleDog, "/tmp/gt")
+	if got != want {
+		t.Errorf("buildAgentBeadID(RoleDog) = %q, want %q", got, want)
+	}
+
+	// Identity inference path
+	got = buildAgentBeadID("deacon/dogs/alpha", RoleUnknown, "/tmp/gt")
+	if got != want {
+		t.Errorf("buildAgentBeadID(RoleUnknown, \"deacon/dogs/alpha\") = %q, want %q", got, want)
 	}
 }

@@ -1,9 +1,9 @@
 package cmd
 
 import (
-	"github.com/steveyegge/gastown/internal/cli"
 	"encoding/json"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/cli"
 	"os"
 	"path/filepath"
 	"time"
@@ -34,6 +34,8 @@ func outputPrimeContext(ctx RoleContext) error {
 		roleName = "mayor"
 	case RoleDeacon:
 		roleName = "deacon"
+	case RoleDog:
+		roleName = "dog"
 	case RoleWitness:
 		roleName = "witness"
 	case RoleRefinery:
@@ -70,6 +72,7 @@ func outputPrimeContext(ctx RoleContext) error {
 		WorkDir:       ctx.WorkDir,
 		DefaultBranch: defaultBranch,
 		Polecat:       ctx.Polecat,
+		DogName:       ctx.Polecat,
 		MayorSession:  session.MayorSessionName(),
 		DeaconSession: session.DeaconSessionName(),
 	}
@@ -88,6 +91,8 @@ func outputPrimeContextFallback(ctx RoleContext) error {
 	switch ctx.Role {
 	case RoleMayor:
 		outputMayorContext(ctx)
+	case RoleDog:
+		outputDogContext(ctx)
 	case RoleWitness:
 		outputWitnessContext(ctx)
 	case RoleRefinery:
@@ -221,6 +226,28 @@ func outputCrewContext(ctx RoleContext) {
 		style.Dim.Render(ctx.Polecat), style.Dim.Render(ctx.Rig))
 }
 
+func outputDogContext(ctx RoleContext) {
+	fmt.Printf("%s\n\n", style.Bold.Render("# Dog Context"))
+	if ctx.Polecat != "" {
+		fmt.Printf("You are Dog **%s**.\n\n", style.Bold.Render(ctx.Polecat))
+	} else {
+		fmt.Println("You are a Dog worker.")
+		fmt.Println()
+	}
+	fmt.Println("## Key Commands")
+	fmt.Println("- `" + cli.Name() + " hook` - Check your assigned work")
+	fmt.Println("- `" + cli.Name() + " dog done` - Return to idle when complete")
+	fmt.Println("- `bd show <id>` - View assignment details")
+	fmt.Println()
+	outputCommandQuickReference(ctx)
+	if ctx.Polecat != "" {
+		fmt.Printf("Dog: %s | Town root: %s\n",
+			style.Dim.Render(ctx.Polecat), style.Dim.Render(ctx.TownRoot))
+		return
+	}
+	fmt.Printf("Town root: %s\n", style.Dim.Render(ctx.TownRoot))
+}
+
 func outputBootContext(ctx RoleContext) {
 	fmt.Printf("%s\n\n", style.Bold.Render("# Boot Watchdog Context"))
 	fmt.Println("You are the **Boot Watchdog** - the daemon's entry point for Deacon triage.")
@@ -250,6 +277,7 @@ func outputUnknownContext(ctx RoleContext) {
 	fmt.Println("- `<rig>/polecats/<name>/` - Polecat role")
 	fmt.Println("- `<rig>/witness/rig/` - Witness role")
 	fmt.Println("- `<rig>/refinery/rig/` - Refinery role")
+	fmt.Println("- `deacon/dogs/<name>/` - Dog role")
 	fmt.Println("- `mayor/` or `<rig>/mayor/` - Mayor role")
 	fmt.Println("- Town root is neutral (set GT_ROLE or cd into a role directory)")
 	fmt.Println()
@@ -316,6 +344,13 @@ func outputCommandQuickReference(ctx RoleContext) {
 		fmt.Printf("| Pause rig (daemon won't restart) | `%s rig park <rig>` | ~~gt rig stop~~ (daemon will restart it) |\n", c)
 		fmt.Printf("| Permanently disable rig | `%s rig dock <rig>` | ~~gt rig park~~ (temporary only) |\n", c)
 		fmt.Printf("| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
+
+	case RoleDog:
+		fmt.Println("| Want to... | Correct command | Common mistake |")
+		fmt.Println("|------------|----------------|----------------|")
+		fmt.Printf("| Check assignment | `%s hook` | ~~gt mail inbox~~ (hook is authoritative) |\n", c)
+		fmt.Printf("| Mark work complete | `%s dog done` | ~~gt done~~ (dogs return to idle via dog done) |\n", c)
+		fmt.Println("| View issue details | `bd show <id>` | ~~guessing from memory~~ (inspect the bead) |")
 
 	case RoleBoot:
 		fmt.Println("| Want to... | Correct command | Common mistake |")

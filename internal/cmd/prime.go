@@ -34,6 +34,7 @@ type Role string
 const (
 	RoleMayor    Role = "mayor"
 	RoleDeacon   Role = "deacon"
+	RoleDog      Role = "dog"
 	RoleBoot     Role = "boot"
 	RoleWitness  Role = "witness"
 	RoleRefinery Role = "refinery"
@@ -564,6 +565,11 @@ func buildRoleAnnouncement(ctx RoleContext) string {
 		return "Mayor, checking in."
 	case RoleDeacon:
 		return "Deacon, checking in."
+	case RoleDog:
+		if ctx.Polecat != "" {
+			return fmt.Sprintf("Dog %s, checking in.", ctx.Polecat)
+		}
+		return "Dog, checking in."
 	case RoleBoot:
 		return "Boot, checking in."
 	case RoleWitness:
@@ -600,6 +606,11 @@ func getAgentIdentity(ctx RoleContext) string {
 		return "mayor"
 	case RoleDeacon:
 		return "deacon"
+	case RoleDog:
+		if ctx.Polecat != "" {
+			return fmt.Sprintf("deacon/dogs/%s", ctx.Polecat)
+		}
+		return "dog"
 	case RoleBoot:
 		return "boot"
 	case RoleWitness:
@@ -671,6 +682,11 @@ func getAgentBeadID(ctx RoleContext) string {
 		return beads.MayorBeadIDTown()
 	case RoleDeacon:
 		return beads.DeaconBeadIDTown()
+	case RoleDog:
+		if ctx.Polecat != "" {
+			return beads.DogBeadIDTown(ctx.Polecat)
+		}
+		return ""
 	case RoleBoot:
 		// Boot uses deacon's bead since it's a deacon subprocess
 		return beads.DeaconBeadIDTown()

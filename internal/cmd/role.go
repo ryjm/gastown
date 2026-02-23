@@ -28,12 +28,12 @@ type RoleInfo struct {
 	Home          string `json:"home"`
 	Rig           string `json:"rig,omitempty"`
 	Polecat       string `json:"polecat,omitempty"`
-	EnvRole       string `json:"env_role,omitempty"`    // Value of GT_ROLE if set
-	CwdRole       Role   `json:"cwd_role,omitempty"`    // Role detected from cwd
-	Mismatch      bool   `json:"mismatch,omitempty"`    // True if env != cwd detection
+	EnvRole       string `json:"env_role,omitempty"`       // Value of GT_ROLE if set
+	CwdRole       Role   `json:"cwd_role,omitempty"`       // Role detected from cwd
+	Mismatch      bool   `json:"mismatch,omitempty"`       // True if env != cwd detection
 	EnvIncomplete bool   `json:"env_incomplete,omitempty"` // True if env was set but missing rig/polecat, filled from cwd
 	TownRoot      string `json:"town_root,omitempty"`
-	WorkDir       string `json:"work_dir,omitempty"`    // Current working directory
+	WorkDir       string `json:"work_dir,omitempty"` // Current working directory
 }
 
 var roleCmd = &cobra.Command{
@@ -190,15 +190,17 @@ func GetRoleWithContext(cwd, townRoot string) (RoleInfo, error) {
 		info.Polecat = polecat
 		info.Source = "env"
 
-		// For simple role strings like "crew" or "polecat", also check
-		// GT_RIG and GT_CREW/GT_POLECAT env vars for the full identity
+		// For simple role strings like "crew", "polecat", or "dog", also check
+		// GT_RIG and GT_CREW/GT_POLECAT/GT_DOG env vars for the full identity
 		if info.Rig == "" {
 			if envRig := os.Getenv("GT_RIG"); envRig != "" {
 				info.Rig = envRig
 			}
 		}
 		if info.Polecat == "" {
-			if envCrew := os.Getenv("GT_CREW"); envCrew != "" {
+			if envDog := os.Getenv("GT_DOG"); envDog != "" {
+				info.Polecat = envDog
+			} else if envCrew := os.Getenv("GT_CREW"); envCrew != "" {
 				info.Polecat = envCrew
 			} else if envPolecat := os.Getenv("GT_POLECAT"); envPolecat != "" {
 				info.Polecat = envPolecat
@@ -208,7 +210,7 @@ func GetRoleWithContext(cwd, townRoot string) (RoleInfo, error) {
 		// If env is incomplete (missing rig/polecat for roles that need them),
 		// fill gaps from cwd detection and mark as incomplete
 		needsRig := parsedRole == RoleWitness || parsedRole == RoleRefinery || parsedRole == RolePolecat || parsedRole == RoleCrew
-		needsPolecat := parsedRole == RolePolecat || parsedRole == RoleCrew
+		needsPolecat := parsedRole == RolePolecat || parsedRole == RoleCrew || parsedRole == RoleDog
 
 		if needsRig && info.Rig == "" && cwdCtx.Rig != "" {
 			info.Rig = cwdCtx.Rig
@@ -276,6 +278,14 @@ func detectRole(cwd, townRoot string) RoleInfo {
 		return ctx
 	}
 
+	// Check for dog role: deacon/dogs/<name>/
+	// Must check before deacon since dogs are under deacon directory.
+	if len(parts) >= 3 && parts[0] == "deacon" && parts[1] == "dogs" {
+		ctx.Role = RoleDog
+		ctx.Polecat = parts[2] // Reuse Polecat field for dog worker name
+		return ctx
+	}
+
 	// Check for deacon role: deacon/
 	if len(parts) >= 1 && parts[0] == "deacon" {
 		ctx.Role = RoleDeacon
@@ -335,6 +345,8 @@ func parseRoleString(s string) (Role, string, string) {
 		return RoleMayor, "", ""
 	case "deacon":
 		return RoleDeacon, "", ""
+	case "dog":
+		return RoleDog, "", ""
 	case "boot":
 		return RoleBoot, "", ""
 	}
@@ -353,6 +365,12 @@ func parseRoleString(s string) (Role, string, string) {
 		// Handle compound "deacon/boot" format from GT_ROLE env var
 		if rig == "deacon" && len(parts) == 2 {
 			return RoleBoot, "", ""
+		}
+		return Role(s), "", ""
+	case "dogs":
+		// Handle dog identities in compound format.
+		if rig == "deacon" && len(parts) >= 3 {
+			return RoleDog, "", parts[2]
 		}
 		return Role(s), "", ""
 	case "witness":
@@ -407,6 +425,11 @@ func (info RoleInfo) ActorString() string {
 			return fmt.Sprintf("%s/crew/%s", info.Rig, info.Polecat)
 		}
 		return "crew"
+	case RoleDog:
+		if info.Polecat != "" {
+			return fmt.Sprintf("deacon/dogs/%s", info.Polecat)
+		}
+		return "dog"
 	case RoleBoot:
 		return "deacon-boot"
 	default:
@@ -441,6 +464,11 @@ func getRoleHome(role Role, rig, polecat, townRoot string) string {
 			return ""
 		}
 		return filepath.Join(townRoot, rig, "crew", polecat)
+	case RoleDog:
+		if polecat == "" {
+			return filepath.Join(townRoot, "deacon", "dogs")
+		}
+		return filepath.Join(townRoot, "deacon", "dogs", polecat)
 	case RoleBoot:
 		return filepath.Join(townRoot, "deacon", "dogs", "boot")
 	default:
@@ -585,6 +613,7 @@ func runRoleList(cmd *cobra.Command, args []string) error {
 	}{
 		{RoleMayor, "Global coordinator at mayor/"},
 		{RoleDeacon, "Background supervisor daemon"},
+		{RoleDog, "Town-level helper worker in deacon/dogs/<name>/"},
 		{RoleWitness, "Per-rig polecat lifecycle manager"},
 		{RoleRefinery, "Per-rig merge queue processor"},
 		{RolePolecat, "Worker with persistent identity, ephemeral sessions"},

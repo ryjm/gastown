@@ -46,6 +46,12 @@ func buildAgentBeadID(identity string, role Role, townRoot string) string {
 			return beads.DeaconBeadIDTown()
 		case identity == "deacon-boot":
 			return beads.DogBeadIDTown("boot")
+		case strings.HasPrefix(identity, "deacon/dogs/"):
+			name := strings.TrimPrefix(identity, "deacon/dogs/")
+			if name != "" && !strings.Contains(name, "/") {
+				return beads.DogBeadIDTown(name)
+			}
+			return ""
 		case len(parts) == 2 && parts[1] == "witness":
 			return beads.WitnessBeadIDWithPrefix(getPrefix(parts[0]), parts[0])
 		case len(parts) == 2 && parts[1] == "refinery":
@@ -69,6 +75,14 @@ func buildAgentBeadID(identity string, role Role, townRoot string) string {
 		return beads.MayorBeadIDTown()
 	case RoleDeacon:
 		return beads.DeaconBeadIDTown()
+	case RoleDog:
+		if strings.HasPrefix(identity, "deacon/dogs/") {
+			name := strings.TrimPrefix(identity, "deacon/dogs/")
+			if name != "" && !strings.Contains(name, "/") {
+				return beads.DogBeadIDTown(name)
+			}
+		}
+		return ""
 	case RoleWitness:
 		if len(parts) >= 1 {
 			return beads.WitnessBeadIDWithPrefix(getPrefix(parts[0]), parts[0])
@@ -998,7 +1012,8 @@ func outputMoleculeCurrent(info MoleculeCurrentInfo) error {
 func isTownLevelRole(agentID string) bool {
 	return agentID == "mayor" || agentID == "mayor/" ||
 		agentID == "deacon" || agentID == "deacon/" ||
-		agentID == "deacon/boot" || agentID == "deacon-boot"
+		agentID == "deacon/boot" || agentID == "deacon-boot" ||
+		(strings.HasPrefix(agentID, "deacon/dogs/") && strings.Count(agentID, "/") == 2)
 }
 
 // extractMailSender extracts the sender from mail bead labels.

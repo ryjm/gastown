@@ -16,7 +16,7 @@ func TestAgentEnv_Mayor(t *testing.T) {
 	assertEnv(t, env, "GIT_AUTHOR_NAME", "mayor")
 	assertEnv(t, env, "GT_ROOT", "/town")
 	assertEnv(t, env, "GIT_CEILING_DIRECTORIES", "/town") // prevents git walking to umbrella
-	assertEnv(t, env, "NODE_OPTIONS", "")                  // cleared to prevent debugger inheritance
+	assertEnv(t, env, "NODE_OPTIONS", "")                 // cleared to prevent debugger inheritance
 	assertNotSet(t, env, "GT_RIG")
 }
 
@@ -51,7 +51,7 @@ func TestAgentEnv_Polecat(t *testing.T) {
 	assertEnv(t, env, "GIT_AUTHOR_NAME", "Toast")
 	assertEnv(t, env, "BEADS_AGENT_NAME", "myrig/Toast")
 	assertEnv(t, env, "BD_DOLT_AUTO_COMMIT", "off") // gt-5cc2p: prevent manifest contention
-	assertEnv(t, env, "NODE_OPTIONS", "")            // cleared to prevent debugger inheritance
+	assertEnv(t, env, "NODE_OPTIONS", "")           // cleared to prevent debugger inheritance
 }
 
 func TestAgentEnv_Crew(t *testing.T) {
@@ -109,6 +109,22 @@ func TestAgentEnv_Boot(t *testing.T) {
 	assertEnv(t, env, "GT_ROLE", "deacon/boot") // compound format
 	assertEnv(t, env, "BD_ACTOR", "deacon-boot")
 	assertEnv(t, env, "GIT_AUTHOR_NAME", "boot")
+	assertEnv(t, env, "GT_ROOT", "/town")
+	assertNotSet(t, env, "GT_RIG")
+}
+
+func TestAgentEnv_Dog(t *testing.T) {
+	t.Parallel()
+	env := AgentEnv(AgentEnvConfig{
+		Role:      "dog",
+		AgentName: "alpha",
+		TownRoot:  "/town",
+	})
+
+	assertEnv(t, env, "GT_ROLE", "deacon/dogs/alpha")
+	assertEnv(t, env, "GT_DOG", "alpha")
+	assertEnv(t, env, "BD_ACTOR", "deacon/dogs/alpha")
+	assertEnv(t, env, "GIT_AUTHOR_NAME", "deacon/dogs/alpha")
 	assertEnv(t, env, "GT_ROOT", "/town")
 	assertNotSet(t, env, "GT_RIG")
 }
@@ -517,6 +533,7 @@ func TestAgentEnv_IncludesNodeOptionsClearing(t *testing.T) {
 		{"mayor", "", ""},
 		{"deacon", "", ""},
 		{"boot", "", ""},
+		{"dog", "", "alpha"},
 		{"witness", "myrig", ""},
 		{"refinery", "myrig", ""},
 		{"polecat", "myrig", "Toast"},

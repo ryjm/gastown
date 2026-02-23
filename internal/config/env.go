@@ -11,7 +11,7 @@ import (
 // AgentEnvConfig specifies the configuration for generating agent environment variables.
 // This is the single source of truth for all agent environment configuration.
 type AgentEnvConfig struct {
-	// Role is the agent role: mayor, deacon, witness, refinery, crew, polecat, boot
+	// Role is the agent role: mayor, deacon, witness, refinery, crew, polecat, dog, boot
 	Role string
 
 	// Rig is the rig name (empty for town-level agents like mayor/deacon)
@@ -56,6 +56,18 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		env["GT_ROLE"] = "deacon/boot"
 		env["BD_ACTOR"] = "deacon-boot"
 		env["GIT_AUTHOR_NAME"] = "boot"
+
+	case "dog":
+		if cfg.AgentName == "" {
+			env["GT_ROLE"] = "dog"
+			env["BD_ACTOR"] = "dog"
+			env["GIT_AUTHOR_NAME"] = "dog"
+		} else {
+			env["GT_ROLE"] = fmt.Sprintf("deacon/dogs/%s", cfg.AgentName)
+			env["GT_DOG"] = cfg.AgentName
+			env["BD_ACTOR"] = fmt.Sprintf("deacon/dogs/%s", cfg.AgentName)
+			env["GIT_AUTHOR_NAME"] = fmt.Sprintf("deacon/dogs/%s", cfg.AgentName)
+		}
 
 	case "witness":
 		env["GT_ROLE"] = fmt.Sprintf("%s/witness", cfg.Rig)
