@@ -1,9 +1,9 @@
 package cmd
 
 import (
-	"github.com/steveyegge/gastown/internal/cli"
 	"encoding/json"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/cli"
 	"os"
 	"path/filepath"
 	"time"
@@ -44,6 +44,8 @@ func outputPrimeContext(ctx RoleContext) error {
 		roleName = "crew"
 	case RoleBoot:
 		roleName = "boot"
+	case RoleDog:
+		roleName = "dog"
 	default:
 		// Unknown role - use fallback
 		return outputPrimeContextFallback(ctx)
@@ -70,6 +72,7 @@ func outputPrimeContext(ctx RoleContext) error {
 		WorkDir:       ctx.WorkDir,
 		DefaultBranch: defaultBranch,
 		Polecat:       ctx.Polecat,
+		DogName:       dogNameFromRoleContext(ctx),
 		MayorSession:  session.MayorSessionName(),
 		DeaconSession: session.DeaconSessionName(),
 	}
@@ -98,6 +101,8 @@ func outputPrimeContextFallback(ctx RoleContext) error {
 		outputCrewContext(ctx)
 	case RoleBoot:
 		outputBootContext(ctx)
+	case RoleDog:
+		outputDogContext(ctx)
 	default:
 		outputUnknownContext(ctx)
 	}
@@ -239,6 +244,24 @@ func outputBootContext(ctx RoleContext) {
 	fmt.Printf("Town root: %s\n", style.Dim.Render(ctx.TownRoot))
 }
 
+func outputDogContext(ctx RoleContext) {
+	dogName := dogNameFromRoleContext(ctx)
+	if dogName == "" {
+		dogName = "(unknown)"
+	}
+
+	fmt.Printf("%s\n\n", style.Bold.Render("# Dog Context"))
+	fmt.Printf("You are Dog **%s** - a Deacon-dispatched infrastructure worker.\n\n", style.Bold.Render(dogName))
+	fmt.Println("## Startup Protocol")
+	fmt.Println("1. Run `" + cli.Name() + " hook` to check your assignment")
+	fmt.Println("2. If work is hooked, execute immediately")
+	fmt.Println("3. When done, run `" + cli.Name() + " dog done` to return to idle")
+	fmt.Println()
+	outputCommandQuickReference(ctx)
+	fmt.Printf("Dog: %s | Town root: %s\n",
+		style.Dim.Render(dogName), style.Dim.Render(ctx.TownRoot))
+}
+
 func outputUnknownContext(ctx RoleContext) {
 	fmt.Printf("%s\n\n", style.Bold.Render("# Gas Town Context"))
 	fmt.Println("Could not determine specific role from current directory.")
@@ -323,6 +346,13 @@ func outputCommandQuickReference(ctx RoleContext) {
 		fmt.Printf("| Run triage | `%s boot triage` | ~~gt deacon heartbeat~~ (that's Deacon's job) |\n", c)
 		fmt.Printf("| Check Deacon health | `%s deacon status` | ~~gt status~~ (town-wide, not Deacon-specific) |\n", c)
 		fmt.Printf("| Nudge the Deacon | `%s nudge deacon \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
+
+	case RoleDog:
+		fmt.Println("| Want to... | Correct command | Common mistake |")
+		fmt.Println("|------------|----------------|----------------|")
+		fmt.Printf("| Check assignment | `%s hook` | ~~waiting for mail~~ (hook is authoritative) |\n", c)
+		fmt.Printf("| Return to idle | `%s dog done` | ~~%s done~~ (dogs return to kennel) |\n", c, c)
+		fmt.Printf("| Report blocker | `%s mail send deacon -s \"BLOCKED\" -m \"...\"` | ~~silence~~ (deacon can't help if it doesn't know) |\n", c)
 	}
 
 	fmt.Println()
@@ -465,6 +495,15 @@ func outputStartupDirective(ctx RoleContext) {
 		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context)")
 		fmt.Println("2. Run `" + cli.Name() + " boot triage` immediately")
 		fmt.Println("3. When triage completes, exit cleanly")
+	case RoleDog:
+		fmt.Println()
+		fmt.Println("---")
+		fmt.Println()
+		fmt.Println("**STARTUP PROTOCOL**: You are Dog. Please:")
+		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context)")
+		fmt.Println("2. Check hook: `" + cli.Name() + " hook`")
+		fmt.Println("3. If work is hooked, execute immediately")
+		fmt.Println("4. When work is complete, run `" + cli.Name() + " dog done`")
 	}
 }
 

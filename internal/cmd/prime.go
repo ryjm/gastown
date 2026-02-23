@@ -35,6 +35,7 @@ const (
 	RoleMayor    Role = "mayor"
 	RoleDeacon   Role = "deacon"
 	RoleBoot     Role = "boot"
+	RoleDog      Role = "dog"
 	RoleWitness  Role = "witness"
 	RoleRefinery Role = "refinery"
 	RolePolecat  Role = "polecat"
@@ -566,6 +567,11 @@ func buildRoleAnnouncement(ctx RoleContext) string {
 		return "Deacon, checking in."
 	case RoleBoot:
 		return "Boot, checking in."
+	case RoleDog:
+		if dogName := dogNameFromRoleContext(ctx); dogName != "" {
+			return fmt.Sprintf("Dog %s, checking in.", dogName)
+		}
+		return "Dog, checking in."
 	case RoleWitness:
 		return fmt.Sprintf("%s Witness, checking in.", ctx.Rig)
 	case RoleRefinery:
@@ -577,6 +583,21 @@ func buildRoleAnnouncement(ctx RoleContext) string {
 	default:
 		return "Agent, checking in."
 	}
+}
+
+func dogNameFromRoleContext(ctx RoleContext) string {
+	if ctx.Polecat != "" {
+		return ctx.Polecat
+	}
+
+	parts := splitPathComponents(ctx.WorkDir)
+	for i := 0; i < len(parts)-1; i++ {
+		if parts[i] == "dogs" && i > 0 && parts[i-1] == "deacon" {
+			return parts[i+1]
+		}
+	}
+
+	return ""
 }
 
 // getGitRoot returns the root of the current git repository.
@@ -602,6 +623,11 @@ func getAgentIdentity(ctx RoleContext) string {
 		return "deacon"
 	case RoleBoot:
 		return "boot"
+	case RoleDog:
+		if dogName := dogNameFromRoleContext(ctx); dogName != "" {
+			return fmt.Sprintf("deacon/dogs/%s", dogName)
+		}
+		return "dog"
 	case RoleWitness:
 		return fmt.Sprintf("%s/witness", ctx.Rig)
 	case RoleRefinery:
@@ -663,7 +689,7 @@ func acquireIdentityLock(ctx RoleContext) error {
 }
 
 // getAgentBeadID returns the agent bead ID for the current role.
-// Town-level agents (mayor, deacon) use hq- prefix; rig-scoped agents use the rig's prefix.
+// Town-level agents (mayor, deacon, dog) use hq- prefix; rig-scoped agents use the rig's prefix.
 // Returns empty string for unknown roles.
 func getAgentBeadID(ctx RoleContext) string {
 	switch ctx.Role {
@@ -674,6 +700,11 @@ func getAgentBeadID(ctx RoleContext) string {
 	case RoleBoot:
 		// Boot uses deacon's bead since it's a deacon subprocess
 		return beads.DeaconBeadIDTown()
+	case RoleDog:
+		if dogName := dogNameFromRoleContext(ctx); dogName != "" {
+			return beads.DogBeadIDTown(dogName)
+		}
+		return ""
 	case RoleWitness:
 		if ctx.Rig != "" {
 			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)

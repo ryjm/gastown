@@ -55,6 +55,15 @@ func TestGetAgentBeadID_UsesRigPrefix(t *testing.T) {
 			want: "hq-deacon",
 		},
 		{
+			name: "dog",
+			ctx: RoleContext{
+				Role:     RoleDog,
+				Polecat:  "alpha",
+				TownRoot: townRoot,
+			},
+			want: "hq-dog-alpha",
+		},
+		{
 			name: "witness",
 			ctx: RoleContext{
 				Role:     RoleWitness,
