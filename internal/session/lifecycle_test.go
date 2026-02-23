@@ -1,7 +1,10 @@
 package session
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 func TestStartSession_RequiresSessionID(t *testing.T) {
@@ -104,6 +107,92 @@ func TestBuildCommand_WithAgentOverride(t *testing.T) {
 	}
 	if cmd == "" {
 		t.Fatal("expected non-empty command")
+	}
+}
+
+func TestStartupFallbackPlan_Disabled(t *testing.T) {
+	commands, waitBeforeNudge := startupFallbackPlan(SessionConfig{
+		Role:               "crew",
+		RunStartupFallback: false,
+	}, nil)
+
+	if len(commands) != 0 {
+		t.Fatalf("expected no fallback commands when disabled, got %v", commands)
+	}
+	if waitBeforeNudge {
+		t.Fatal("expected no wait when fallback is disabled")
+	}
+}
+
+func TestStartupFallbackPlan_UsesOverrideRole(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		Provider: "codex",
+		Command:  "codex",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+	}
+
+	commands, waitBeforeNudge := startupFallbackPlan(SessionConfig{
+		Role:                "crew",
+		RunStartupFallback:  true,
+		StartupFallbackRole: "polecat",
+	}, rc)
+
+	if len(commands) != 1 {
+		t.Fatalf("expected one fallback command, got %v", commands)
+	}
+	if !strings.Contains(commands[0], "gt mail check --inject") {
+		t.Fatalf("expected autonomous fallback command to include mail injection, got %q", commands[0])
+	}
+	if !waitBeforeNudge {
+		t.Fatal("expected wait-before-nudge for fallback without ready delay")
+	}
+}
+
+func TestStartupFallbackPlan_SkipsExtraWaitWhenReadyDelayEnabled(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		Provider: "codex",
+		Command:  "codex",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+	}
+
+	commands, waitBeforeNudge := startupFallbackPlan(SessionConfig{
+		Role:               "crew",
+		RunStartupFallback: true,
+		ReadyDelay:         true,
+	}, rc)
+
+	if len(commands) == 0 {
+		t.Fatal("expected fallback commands for non-hook crew runtime")
+	}
+	if waitBeforeNudge {
+		t.Fatal("expected no extra wait when ready delay already ran")
+	}
+}
+
+func TestStartupFallbackPlan_HookRuntimeHasNoFallback(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		Provider: "claude",
+		Command:  "claude",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider:      "claude",
+			Informational: false,
+		},
+	}
+
+	commands, waitBeforeNudge := startupFallbackPlan(SessionConfig{
+		Role:               "crew",
+		RunStartupFallback: true,
+	}, rc)
+
+	if len(commands) != 0 {
+		t.Fatalf("expected no fallback commands for hook-capable runtime, got %v", commands)
+	}
+	if waitBeforeNudge {
+		t.Fatal("expected no wait when there are no fallback commands")
 	}
 }
 

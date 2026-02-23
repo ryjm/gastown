@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -212,6 +213,83 @@ func TestDetectTownRootFromCwd_EnvFallback(t *testing.T) {
 			t.Errorf("detectTownRootFromCwd() = %q, want %q (should accept secondary marker)", result, secondaryTown)
 		}
 	})
+}
+
+func setupHandoffCommandWorkspace(t *testing.T) string {
+	t.Helper()
+
+	townRoot := t.TempDir()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatalf("creating mayor dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test-town"}`), 0644); err != nil {
+		t.Fatalf("creating town.json: %v", err)
+	}
+
+	rigPath := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(filepath.Join(rigPath, "crew", "max"), 0755); err != nil {
+		t.Fatalf("creating rig crew path: %v", err)
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), config.NewTownSettings()); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), config.NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	origCwd, _ := os.Getwd()
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("chdir townRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origCwd) })
+
+	return townRoot
+}
+
+func TestBuildRestartCommand_IncludesStartupBeaconAndRoleEnv(t *testing.T) {
+	setupHandoffTestRegistry(t)
+	setupHandoffCommandWorkspace(t)
+	t.Setenv("GT_AGENT", "claude")
+
+	cmd, err := buildRestartCommand("gt-crew-max")
+	if err != nil {
+		t.Fatalf("buildRestartCommand: %v", err)
+	}
+
+	if !strings.Contains(cmd, "/gastown/crew/max && export") {
+		t.Fatalf("restart command missing workdir: %q", cmd)
+	}
+	if !strings.Contains(cmd, "GT_ROLE=gastown/crew/max") {
+		t.Fatalf("restart command missing GT_ROLE: %q", cmd)
+	}
+	if !strings.Contains(cmd, "BD_ACTOR=gastown/crew/max") {
+		t.Fatalf("restart command missing BD_ACTOR: %q", cmd)
+	}
+	if !strings.Contains(cmd, "[GAS TOWN] gastown/crew/max <- self") {
+		t.Fatalf("restart command missing startup beacon identity: %q", cmd)
+	}
+	if !strings.Contains(cmd, "handoff") {
+		t.Fatalf("restart command missing handoff topic: %q", cmd)
+	}
+}
+
+func TestBuildRestartCommand_PreservesAgentOverride(t *testing.T) {
+	setupHandoffTestRegistry(t)
+	_ = setupHandoffCommandWorkspace(t)
+	t.Setenv("GT_AGENT", "codex")
+
+	cmd, err := buildRestartCommand("gt-crew-max")
+	if err != nil {
+		t.Fatalf("buildRestartCommand: %v", err)
+	}
+
+	if !strings.Contains(cmd, "GT_AGENT=codex") {
+		t.Fatalf("restart command missing GT_AGENT export: %q", cmd)
+	}
+	if !strings.Contains(cmd, "codex") {
+		t.Fatalf("restart command should use codex runtime when GT_AGENT is set: %q", cmd)
+	}
 }
 
 // makeTestGitRepo creates a minimal git repo in a temp dir and returns its path.

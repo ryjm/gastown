@@ -242,21 +242,14 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (*StartResult, error) {
 	}
 
 	// 12. Non-hook startup fallback for prompt-less runtimes (codex, etc.).
-	if cfg.RunStartupFallback {
-		fallbackRole := cfg.StartupFallbackRole
-		if fallbackRole == "" {
-			fallbackRole = cfg.Role
+	if commands, waitBeforeNudge := startupFallbackPlan(cfg, runtimeConfig); len(commands) > 0 {
+		// If caller did not explicitly request ready delay, still wait before nudging.
+		// Prompt-less runtimes need this for reliable startup command delivery.
+		if waitBeforeNudge {
+			runtime.SleepForReadyDelay(runtimeConfig)
 		}
-		commands := runtime.StartupFallbackCommands(fallbackRole, runtimeConfig)
-		if len(commands) > 0 {
-			// If caller did not explicitly request ready delay, still wait before nudging.
-			// Prompt-less runtimes need this for reliable startup command delivery.
-			if !cfg.ReadyDelay {
-				runtime.SleepForReadyDelay(runtimeConfig)
-			}
-			for _, command := range commands {
-				_ = t.NudgeSession(cfg.SessionID, command)
-			}
+		for _, command := range commands {
+			_ = t.NudgeSession(cfg.SessionID, command)
 		}
 	}
 
@@ -348,6 +341,23 @@ func buildCommand(cfg SessionConfig, prompt string) (string, error) {
 	}
 	return config.BuildAgentStartupCommand(
 		cfg.Role, cfg.RigName, cfg.TownRoot, cfg.RigPath, prompt), nil
+}
+
+// startupFallbackPlan computes fallback startup commands for prompt-less runtimes.
+// Returns the commands and whether StartSession should sleep for ready delay before nudging.
+func startupFallbackPlan(cfg SessionConfig, runtimeConfig *config.RuntimeConfig) ([]string, bool) {
+	if !cfg.RunStartupFallback {
+		return nil, false
+	}
+
+	fallbackRole := cfg.StartupFallbackRole
+	if fallbackRole == "" {
+		fallbackRole = cfg.Role
+	}
+
+	commands := runtime.StartupFallbackCommands(fallbackRole, runtimeConfig)
+	waitBeforeNudge := len(commands) > 0 && !cfg.ReadyDelay
+	return commands, waitBeforeNudge
 }
 
 // ReadyDelay sleeps for the runtime's configured readiness delay.

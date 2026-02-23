@@ -6,7 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // testDaemon creates a minimal Daemon for testing.
@@ -228,6 +232,97 @@ func TestIdentityToSession_Unknown(t *testing.T) {
 		if result != "" {
 			t.Errorf("identityToSession(%q) = %q, expected empty string", identity, result)
 		}
+	}
+}
+
+func setupDaemonStartCommandConfig(t *testing.T, crewAgent string) string {
+	t.Helper()
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(filepath.Join(rigPath, "crew", "max"), 0755); err != nil {
+		t.Fatalf("creating rig crew path: %v", err)
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), config.NewTownSettings()); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	rigSettings := config.NewRigSettings()
+	if crewAgent != "" {
+		rigSettings.RoleAgents = map[string]string{
+			"crew": crewAgent,
+		}
+	}
+	if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), rigSettings); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+	return townRoot
+}
+
+func TestGetStartCommand_CrewNonHookRuntimeIncludesRoleEnvAndOverride(t *testing.T) {
+	townRoot := setupDaemonStartCommandConfig(t, "codex")
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+	}
+	parsed := &ParsedIdentity{
+		RoleType:  "crew",
+		RigName:   "gastown",
+		AgentName: "max",
+	}
+
+	cmd := d.getStartCommand(nil, parsed)
+
+	if !strings.Contains(cmd, "GT_ROLE=gastown/crew/max") {
+		t.Fatalf("startup command missing GT_ROLE: %q", cmd)
+	}
+	if !strings.Contains(cmd, "BD_ACTOR=gastown/crew/max") {
+		t.Fatalf("startup command missing BD_ACTOR: %q", cmd)
+	}
+	if !strings.Contains(cmd, "codex") {
+		t.Fatalf("startup command should respect role agent override to codex: %q", cmd)
+	}
+}
+
+func TestGetStartCommand_CrewHookRuntimeIncludesLifecycleBeacon(t *testing.T) {
+	townRoot := setupDaemonStartCommandConfig(t, "claude")
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+	}
+	parsed := &ParsedIdentity{
+		RoleType:  "crew",
+		RigName:   "gastown",
+		AgentName: "max",
+	}
+
+	cmd := d.getStartCommand(nil, parsed)
+
+	if !strings.Contains(cmd, "[GAS TOWN] gastown/crew/max <- daemon") {
+		t.Fatalf("startup command missing lifecycle beacon identity: %q", cmd)
+	}
+	if !strings.Contains(cmd, "lifecycle-restart") {
+		t.Fatalf("startup command missing lifecycle restart topic: %q", cmd)
+	}
+	if !strings.Contains(cmd, "gt prime --hook") {
+		t.Fatalf("startup command missing bootstrap instruction: %q", cmd)
+	}
+}
+
+func TestGetStartCommand_UsesRoleConfigWhenProvided(t *testing.T) {
+	d := testDaemon()
+	parsed := &ParsedIdentity{
+		RoleType:  "crew",
+		RigName:   "gastown",
+		AgentName: "max",
+	}
+	roleConfig := &beads.RoleConfig{
+		StartCommand: "exec run --role {role} --agent {name}",
+	}
+
+	cmd := d.getStartCommand(roleConfig, parsed)
+	want := "exec run --role crew --agent max"
+	if cmd != want {
+		t.Fatalf("getStartCommand(roleConfig) = %q, want %q", cmd, want)
 	}
 }
 

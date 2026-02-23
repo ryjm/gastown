@@ -16,8 +16,8 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -97,6 +97,23 @@ func buildResumeArgs(agentName, sessionID string) (string, error) {
 		return preset.ContinueFlag, nil
 	}
 	return preset.ResumeFlag + " " + config.ShellQuote(sessionID), nil
+}
+
+func crewStartupBeacon(rigName, crewName, topic string) string {
+	if topic == "" {
+		topic = "start"
+	}
+	address := fmt.Sprintf("%s/crew/%s", rigName, crewName)
+	return session.FormatStartupBeacon(session.BeaconConfig{
+		Recipient: address,
+		Sender:    "human",
+		Topic:     topic,
+	})
+}
+
+func buildCrewStartupCommand(rigName, crewName, rigPath, topic, agentOverride string) (string, error) {
+	beacon := crewStartupBeacon(rigName, crewName, topic)
+	return config.BuildCrewStartupCommandWithAgentOverride(rigName, crewName, rigPath, beacon, agentOverride)
 }
 
 // validateCrewName checks that a crew name is safe and valid.
@@ -692,17 +709,7 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	} else {
 		// Normal start: build beacon for predecessor discovery via /resume.
 		// Only used in fresh-start mode — resumed sessions already have context.
-		address := fmt.Sprintf("%s/crew/%s", m.rig.Name, name)
-		topic := opts.Topic
-		if topic == "" {
-			topic = "start"
-		}
-		beacon := session.FormatStartupBeacon(session.BeaconConfig{
-			Recipient: address,
-			Sender:    "human",
-			Topic:     topic,
-		})
-		claudeCmd, err = config.BuildCrewStartupCommandWithAgentOverride(m.rig.Name, name, m.rig.Path, beacon, opts.AgentOverride)
+		claudeCmd, err = buildCrewStartupCommand(m.rig.Name, name, m.rig.Path, opts.Topic, opts.AgentOverride)
 		if err != nil {
 			return fmt.Errorf("building startup command: %w", err)
 		}

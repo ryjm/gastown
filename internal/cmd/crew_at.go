@@ -20,6 +20,29 @@ import (
 // crewAtRetried tracks if we've already retried after stale session cleanup
 var crewAtRetried bool
 
+func crewAtStartupBeacon(rigName, crewName, topic string) string {
+	if topic == "" {
+		topic = "start"
+	}
+	address := fmt.Sprintf("%s/crew/%s", rigName, crewName)
+	return session.FormatStartupBeacon(session.BeaconConfig{
+		Recipient: address,
+		Sender:    "human",
+		Topic:     topic,
+	})
+}
+
+func buildCrewAtStartupCommand(rigName, crewName, rigPath, topic, agentOverride string, runtimeConfig *config.RuntimeConfig, configDir string) (string, error) {
+	startupCmd, err := config.BuildCrewStartupCommandWithAgentOverride(rigName, crewName, rigPath, crewAtStartupBeacon(rigName, crewName, topic), agentOverride)
+	if err != nil {
+		return "", err
+	}
+	if runtimeConfig != nil && runtimeConfig.Session != nil && runtimeConfig.Session.ConfigDirEnv != "" && configDir != "" {
+		startupCmd = config.PrependEnv(startupCmd, map[string]string{runtimeConfig.Session.ConfigDirEnv: configDir})
+	}
+	return startupCmd, nil
+}
+
 func runCrewAt(cmd *cobra.Command, args []string) error {
 	var name string
 
@@ -225,26 +248,12 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("getting pane ID: %w", err)
 		}
 
-		// Build startup beacon for predecessor discovery via /resume
-		// Use FormatStartupBeacon instead of bare "gt prime" which confuses agents
-		// The SessionStart hook handles context injection (gt prime --hook)
-		address := fmt.Sprintf("%s/crew/%s", r.Name, name)
-		beacon := session.FormatStartupBeacon(session.BeaconConfig{
-			Recipient: address,
-			Sender:    "human",
-			Topic:     "start",
-		})
-
 		// Use respawn-pane to replace shell with runtime directly
 		// This gives cleaner lifecycle: runtime exits → session ends (no intermediate shell)
 		// Export GT_ROLE and BD_ACTOR since tmux SetEnvironment only affects new panes
-		startupCmd, err := config.BuildCrewStartupCommandWithAgentOverride(r.Name, name, r.Path, beacon, crewAgentOverride)
+		startupCmd, err := buildCrewAtStartupCommand(r.Name, name, r.Path, "start", crewAgentOverride, runtimeConfig, claudeConfigDir)
 		if err != nil {
 			return fmt.Errorf("building startup command: %w", err)
-		}
-		// Prepend config dir env if available
-		if runtimeConfig.Session != nil && runtimeConfig.Session.ConfigDirEnv != "" && claudeConfigDir != "" {
-			startupCmd = config.PrependEnv(startupCmd, map[string]string{runtimeConfig.Session.ConfigDirEnv: claudeConfigDir})
 		}
 		// Note: Don't call KillPaneProcesses here - this is a NEW session with just
 		// a fresh shell. Killing it would destroy the pane before we can respawn.
@@ -271,24 +280,11 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("getting pane ID: %w", err)
 			}
 
-			// Build startup beacon for predecessor discovery via /resume
-			// Use FormatStartupBeacon instead of bare "gt prime" which confuses agents
-			address := fmt.Sprintf("%s/crew/%s", r.Name, name)
-			beacon := session.FormatStartupBeacon(session.BeaconConfig{
-				Recipient: address,
-				Sender:    "human",
-				Topic:     "restart",
-			})
-
 			// Use respawn-pane to replace shell with runtime directly
 			// Export GT_ROLE and BD_ACTOR since tmux SetEnvironment only affects new panes
-			startupCmd, err := config.BuildCrewStartupCommandWithAgentOverride(r.Name, name, r.Path, beacon, crewAgentOverride)
+			startupCmd, err := buildCrewAtStartupCommand(r.Name, name, r.Path, "restart", crewAgentOverride, runtimeConfig, claudeConfigDir)
 			if err != nil {
 				return fmt.Errorf("building startup command: %w", err)
-			}
-			// Prepend config dir env if available
-			if runtimeConfig.Session != nil && runtimeConfig.Session.ConfigDirEnv != "" && claudeConfigDir != "" {
-				startupCmd = config.PrependEnv(startupCmd, map[string]string{runtimeConfig.Session.ConfigDirEnv: claudeConfigDir})
 			}
 			// Kill all processes in the pane before respawning to prevent orphan leaks
 			// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
@@ -333,12 +329,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 
 		// We're in the session at a shell prompt - start the agent
 		// Build startup beacon for predecessor discovery via /resume
-		address := fmt.Sprintf("%s/crew/%s", r.Name, name)
-		beacon := session.FormatStartupBeacon(session.BeaconConfig{
-			Recipient: address,
-			Sender:    "human",
-			Topic:     "start",
-		})
+		beacon := crewAtStartupBeacon(r.Name, name, "start")
 		fmt.Printf("Starting %s in current session...\n", agentCfg.Command)
 		return execAgent(agentCfg, beacon)
 	}

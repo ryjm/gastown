@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -725,6 +726,81 @@ func TestBuildResumeArgs(t *testing.T) {
 	}
 }
 
+func TestCrewStartupBeacon_DefaultTopic(t *testing.T) {
+	t.Parallel()
+
+	beacon := crewStartupBeacon("gastown", "toast", "")
+	if !strings.Contains(beacon, "[GAS TOWN] gastown/crew/toast <- human") {
+		t.Fatalf("beacon missing startup identity: %q", beacon)
+	}
+	if !strings.Contains(beacon, " start") {
+		t.Fatalf("beacon should default topic to start: %q", beacon)
+	}
+}
+
+func TestBuildCrewStartupCommand_TopicParity(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("mkdir rig path: %v", err)
+	}
+
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), config.NewTownSettings()); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), config.NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	startCmd, err := buildCrewStartupCommand("gastown", "toast", rigPath, "start", "gemini")
+	if err != nil {
+		t.Fatalf("buildCrewStartupCommand(start): %v", err)
+	}
+	restartCmd, err := buildCrewStartupCommand("gastown", "toast", rigPath, "restart", "gemini")
+	if err != nil {
+		t.Fatalf("buildCrewStartupCommand(restart): %v", err)
+	}
+
+	for _, cmd := range []string{startCmd, restartCmd} {
+		if !strings.Contains(cmd, "GT_ROLE=gastown/crew/toast") {
+			t.Fatalf("startup command missing GT_ROLE: %q", cmd)
+		}
+		if !strings.Contains(cmd, "gemini --approval-mode yolo") {
+			t.Fatalf("startup command missing override runtime: %q", cmd)
+		}
+	}
+
+	if !strings.Contains(startCmd, "[GAS TOWN] gastown/crew/toast <- human") || !strings.Contains(startCmd, " start") {
+		t.Fatalf("start command missing start beacon: %q", startCmd)
+	}
+	if !strings.Contains(restartCmd, "[GAS TOWN] gastown/crew/toast <- human") || !strings.Contains(restartCmd, " restart") {
+		t.Fatalf("restart command missing restart beacon: %q", restartCmd)
+	}
+}
+
+func TestBuildCrewStartupCommand_InvalidOverride(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("mkdir rig path: %v", err)
+	}
+
+	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), config.NewTownSettings()); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), config.NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	_, err := buildCrewStartupCommand("gastown", "toast", rigPath, "start", "not-a-real-agent")
+	if err == nil {
+		t.Fatal("expected error for invalid agent override")
+	}
+}
 
 // Helper to run commands
 func runCmd(name string, args ...string) error {
