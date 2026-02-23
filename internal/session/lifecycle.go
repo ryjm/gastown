@@ -122,6 +122,27 @@ type StartResult struct {
 	RuntimeConfig *config.RuntimeConfig
 }
 
+// StartupBootstrapNudger is the minimal tmux behavior needed for startup bootstrap.
+type StartupBootstrapNudger interface {
+	NudgeSession(session, message string) error
+}
+
+// StartupBootstrapConfig controls shared startup bootstrap behavior.
+type StartupBootstrapConfig struct {
+	// Role is the role to bootstrap (e.g., "witness", "refinery", "deacon").
+	Role string
+
+	// StartupFallbackRole overrides Role for fallback command selection.
+	StartupFallbackRole string
+
+	// RuntimeConfig is the resolved runtime config for this session.
+	RuntimeConfig *config.RuntimeConfig
+
+	// ReadyDelayApplied indicates whether the caller already waited for ready delay.
+	// When false and fallback commands exist, this helper sleeps before nudging.
+	ReadyDelayApplied bool
+}
+
 // StartSession creates a tmux session following the standard Gas Town lifecycle.
 //
 // The lifecycle handles:
@@ -243,21 +264,12 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (*StartResult, error) {
 
 	// 12. Non-hook startup fallback for prompt-less runtimes (codex, etc.).
 	if cfg.RunStartupFallback {
-		fallbackRole := cfg.StartupFallbackRole
-		if fallbackRole == "" {
-			fallbackRole = cfg.Role
-		}
-		commands := runtime.StartupFallbackCommands(fallbackRole, runtimeConfig)
-		if len(commands) > 0 {
-			// If caller did not explicitly request ready delay, still wait before nudging.
-			// Prompt-less runtimes need this for reliable startup command delivery.
-			if !cfg.ReadyDelay {
-				runtime.SleepForReadyDelay(runtimeConfig)
-			}
-			for _, command := range commands {
-				_ = t.NudgeSession(cfg.SessionID, command)
-			}
-		}
+		RunStartupBootstrap(t, cfg.SessionID, StartupBootstrapConfig{
+			Role:                cfg.Role,
+			StartupFallbackRole: cfg.StartupFallbackRole,
+			RuntimeConfig:       runtimeConfig,
+			ReadyDelayApplied:   cfg.ReadyDelay,
+		})
 	}
 
 	// 13. Verify session survived startup.
@@ -361,4 +373,34 @@ func ReadyDelay(rc *config.RuntimeConfig) {
 // Some roles use this instead of the runtime's ready delay.
 func ShutdownDelay() time.Duration {
 	return constants.ShutdownNotifyDelay
+}
+
+// RunStartupBootstrap applies shared startup fallback behavior.
+// It sends startup nudge commands only when hooks are unavailable or informational.
+func RunStartupBootstrap(t StartupBootstrapNudger, sessionID string, cfg StartupBootstrapConfig) {
+	if t == nil || sessionID == "" {
+		return
+	}
+
+	fallbackRole := cfg.StartupFallbackRole
+	if fallbackRole == "" {
+		fallbackRole = cfg.Role
+	}
+	if fallbackRole == "" {
+		return
+	}
+
+	commands := runtime.StartupFallbackCommands(fallbackRole, cfg.RuntimeConfig)
+	if len(commands) == 0 {
+		return
+	}
+
+	// If caller has not already waited for readiness, wait before startup nudges.
+	if !cfg.ReadyDelayApplied {
+		runtime.SleepForReadyDelay(cfg.RuntimeConfig)
+	}
+
+	for _, command := range commands {
+		_ = t.NudgeSession(sessionID, command)
+	}
 }

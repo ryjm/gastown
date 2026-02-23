@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -20,10 +21,12 @@ type mockTmux struct {
 	sessionInfo      *tmux.SessionInfo
 	sessionInfoErr   error
 	sendKeysErr      error
+	nudgeErr         error
 
 	// Call tracking
 	killCalls       []string
 	newSessionCalls int
+	nudgeCalls      []string
 }
 
 func (m *mockTmux) HasSession(name string) (bool, error) {
@@ -45,7 +48,7 @@ func (m *mockTmux) NewSessionWithCommand(_, _, _ string) error {
 }
 
 func (m *mockTmux) SetRemainOnExit(_ string, _ bool) error { return nil }
-func (m *mockTmux) SetEnvironment(_, _, _ string) error     { return nil }
+func (m *mockTmux) SetEnvironment(_, _, _ string) error    { return nil }
 func (m *mockTmux) ConfigureGasTownSession(_ string, _ tmux.Theme, _, _, _ string) error {
 	return nil
 }
@@ -54,9 +57,13 @@ func (m *mockTmux) WaitForCommand(_ string, _ []string, _ time.Duration) error {
 	return m.waitErr
 }
 
-func (m *mockTmux) SetAutoRespawnHook(_ string) error              { return nil }
-func (m *mockTmux) AcceptBypassPermissionsWarning(_ string) error  { return nil }
-func (m *mockTmux) SendKeysRaw(_, _ string) error                  { return m.sendKeysErr }
+func (m *mockTmux) SetAutoRespawnHook(_ string) error             { return nil }
+func (m *mockTmux) AcceptBypassPermissionsWarning(_ string) error { return nil }
+func (m *mockTmux) NudgeSession(_ string, message string) error {
+	m.nudgeCalls = append(m.nudgeCalls, message)
+	return m.nudgeErr
+}
+func (m *mockTmux) SendKeysRaw(_, _ string) error { return m.sendKeysErr }
 func (m *mockTmux) GetSessionInfo(_ string) (*tmux.SessionInfo, error) {
 	return m.sessionInfo, m.sessionInfoErr
 }
@@ -307,11 +314,11 @@ func TestStop_KillFails(t *testing.T) {
 
 func TestIsRunning(t *testing.T) {
 	tests := []struct {
-		name     string
-		running  bool
-		err      error
-		wantRun  bool
-		wantErr  bool
+		name    string
+		running bool
+		err     error
+		wantRun bool
+		wantErr bool
 	}{
 		{
 			name:    "running",
@@ -420,5 +427,31 @@ func TestStatus_GetSessionInfoError(t *testing.T) {
 	}
 	if info != nil {
 		t.Error("Status() should return nil info on error")
+	}
+}
+
+func TestRunDeaconStartupBootstrap_NonHookRuntime(t *testing.T) {
+	mock := &mockTmux{}
+	runDeaconStartupBootstrap(mock, "hq-deacon", &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{Provider: "none"},
+	})
+
+	if len(mock.nudgeCalls) != 1 {
+		t.Fatalf("expected 1 startup nudge, got %d", len(mock.nudgeCalls))
+	}
+	want := "gt deacon heartbeat \"boot patrol\" && gt prime && gt mail check --inject"
+	if mock.nudgeCalls[0] != want {
+		t.Fatalf("startup nudge = %q, want %q", mock.nudgeCalls[0], want)
+	}
+}
+
+func TestRunDeaconStartupBootstrap_HookRuntime(t *testing.T) {
+	mock := &mockTmux{}
+	runDeaconStartupBootstrap(mock, "hq-deacon", &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{Provider: "claude"},
+	})
+
+	if len(mock.nudgeCalls) != 0 {
+		t.Fatalf("expected no startup nudges, got %d", len(mock.nudgeCalls))
 	}
 }

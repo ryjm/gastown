@@ -17,8 +17,8 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -204,11 +204,17 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		return fmt.Errorf("waiting for refinery to start: %w", err)
 	}
 
-	// Wait for runtime to be fully ready
-	runtime.SleepForReadyDelay(runtimeConfig)
-	_ = runtime.RunStartupFallback(t, sessionID, "refinery", runtimeConfig)
+	// Shared startup bootstrap for non-hook runtimes (e.g., codex).
+	runRefineryStartupBootstrap(t, sessionID, runtimeConfig)
 
 	return nil
+}
+
+func runRefineryStartupBootstrap(t session.StartupBootstrapNudger, sessionID string, runtimeConfig *config.RuntimeConfig) {
+	session.RunStartupBootstrap(t, sessionID, session.StartupBootstrapConfig{
+		Role:          "refinery",
+		RuntimeConfig: runtimeConfig,
+	})
 }
 
 // Stop stops the refinery.

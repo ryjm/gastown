@@ -210,10 +210,8 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		log.Printf("warning: tracking session PID for %s: %v", sessionID, err)
 	}
 
-	// Non-hook runtimes (e.g., codex) need startup fallback commands since
-	// SessionStart hooks won't run gt prime automatically.
-	runtime.SleepForReadyDelay(runtimeConfig)
-	_ = runtime.RunStartupFallback(t, sessionID, "witness", runtimeConfig)
+	// Shared startup bootstrap for non-hook runtimes (e.g., codex).
+	runWitnessStartupBootstrap(t, sessionID, runtimeConfig)
 
 	time.Sleep(constants.ShutdownNotifyDelay)
 
@@ -267,6 +265,13 @@ func buildWitnessStartCommand(rigPath, rigName, townRoot, agentOverride string, 
 		return "", fmt.Errorf("building startup command: %w", err)
 	}
 	return command, nil
+}
+
+func runWitnessStartupBootstrap(t session.StartupBootstrapNudger, sessionID string, runtimeConfig *config.RuntimeConfig) {
+	session.RunStartupBootstrap(t, sessionID, session.StartupBootstrapConfig{
+		Role:          "witness",
+		RuntimeConfig: runtimeConfig,
+	})
 }
 
 // Stop stops the witness.

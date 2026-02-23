@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -177,5 +178,40 @@ func TestManager_Retry_Deprecated(t *testing.T) {
 	err := mgr.Retry("any-id", false)
 	if err != nil {
 		t.Errorf("Retry() unexpected error: %v", err)
+	}
+}
+
+type startupNudgeRecorder struct {
+	commands []string
+}
+
+func (r *startupNudgeRecorder) NudgeSession(_ string, message string) error {
+	r.commands = append(r.commands, message)
+	return nil
+}
+
+func TestRunRefineryStartupBootstrap_NonHookRuntime(t *testing.T) {
+	recorder := &startupNudgeRecorder{}
+	runRefineryStartupBootstrap(recorder, "gt-test", &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{Provider: "none"},
+	})
+
+	if len(recorder.commands) != 1 {
+		t.Fatalf("expected 1 startup nudge, got %d", len(recorder.commands))
+	}
+	want := "gt prime && gt mail check --inject"
+	if recorder.commands[0] != want {
+		t.Fatalf("startup nudge = %q, want %q", recorder.commands[0], want)
+	}
+}
+
+func TestRunRefineryStartupBootstrap_HookRuntime(t *testing.T) {
+	recorder := &startupNudgeRecorder{}
+	runRefineryStartupBootstrap(recorder, "gt-test", &config.RuntimeConfig{
+		Hooks: &config.RuntimeHooksConfig{Provider: "claude"},
+	})
+
+	if len(recorder.commands) != 0 {
+		t.Fatalf("expected no startup nudges, got %d", len(recorder.commands))
 	}
 }

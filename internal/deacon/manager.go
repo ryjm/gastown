@@ -32,6 +32,7 @@ type tmuxOps interface {
 	WaitForCommand(session string, excludeCommands []string, timeout time.Duration) error
 	SetAutoRespawnHook(session string) error
 	AcceptBypassPermissionsWarning(session string) error
+	NudgeSession(session, message string) error
 	SendKeysRaw(session, keys string) error
 	GetSessionInfo(name string) (*tmux.SessionInfo, error)
 }
@@ -173,16 +174,19 @@ func (m *Manager) Start(agentOverride string) error {
 	// Accept bypass permissions warning dialog if it appears.
 	_ = t.AcceptBypassPermissionsWarning(sessionID)
 
-	// Non-hook runtimes (e.g., codex) need startup fallback commands since
-	// SessionStart hooks won't run gt prime automatically.
-	if realTmux, ok := t.(*tmux.Tmux); ok {
-		runtime.SleepForReadyDelay(runtimeConfig)
-		_ = runtime.RunStartupFallback(realTmux, sessionID, "deacon", runtimeConfig)
-	}
+	// Shared startup bootstrap for non-hook runtimes (e.g., codex).
+	runDeaconStartupBootstrap(t, sessionID, runtimeConfig)
 
 	time.Sleep(constants.ShutdownNotifyDelay)
 
 	return nil
+}
+
+func runDeaconStartupBootstrap(t session.StartupBootstrapNudger, sessionID string, runtimeConfig *config.RuntimeConfig) {
+	session.RunStartupBootstrap(t, sessionID, session.StartupBootstrapConfig{
+		Role:          "deacon",
+		RuntimeConfig: runtimeConfig,
+	})
 }
 
 // Stop stops the deacon session.
