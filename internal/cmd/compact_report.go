@@ -345,6 +345,16 @@ func createCompactReportBead(report *compactReport, markdown string) (string, er
 
 func runWeeklyRollup() error {
 	now := time.Now().UTC()
+
+	// Only send the weekly rollup on Mondays to avoid duplicate reports each patrol cycle
+	if now.Weekday() != time.Monday {
+		if compactReportVerbose {
+			fmt.Printf("%s Skipping weekly rollup (today is %s, not Monday)\n",
+				style.Dim.Render("[skip]"), now.Weekday())
+		}
+		return nil
+	}
+
 	weekEnd := now.Format("2006-01-02")
 	weekStart := now.AddDate(0, 0, -7).Format("2006-01-02")
 
